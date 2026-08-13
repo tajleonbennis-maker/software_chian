@@ -1383,6 +1383,71 @@ def api_experiment_detail(experiment_id):
     return jsonify({"error": "experiment not found"}), 404
 
 
+@app.route("/api/assets")
+def api_assets():
+    """FoFa 风格资产列表：聚合 research_assets + 实验 evidence 中的资产
+
+    ?query= 搜索过滤（host/ip/title）
+    ?limit= 条数（默认 100，求质不求量）
+    """
+    from core.database import ScanDatabase
+    db = ScanDatabase(Config.DATABASE_PATH)
+    query = (request.args.get("query") or "").strip().lower()
+    limit = min(int(request.args.get("limit", "100")), 500)
+
+    assets = []
+    seen = set()
+
+    # 1. 从 research_assets 取
+    try:
+        conn = db._connect()
+        rows = conn.execute(
+            "SELECT asset_json, project_slug, last_seen FROM research_assets ORDER BY last_seen DESC LIMIT ?",
+            (limit * 3,)).fetchall()
+        conn.close()
+        for row in rows:
+            try:
+                asset = json.loads(row["asset_json"])
+            except Exception:
+                continue
+            key = asset.get("host") or asset.get("ip") or asset.get("url")
+            if not key or key in seen:
+                continue
+            asset.setdefault("project_slug", row["project_slug"])
+            assets.append(asset)
+            seen.add(key)
+            if len(assets) >= limit:
+                break
+    except Exception as exc:
+        logger.warning("读取 research_assets 失败: %s", exc)
+
+    # 2. 从实验 evidence 补（fofa 资产类型的 evidence）
+    if len(assets) < limit:
+        lab = scan_database.lab_overview()
+        for e in lab.get("experiments", []):
+            for item in e.get("evidence", []):
+                if "host" in item or "ip" in item or "url" in item:
+                    key = item.get("host") or item.get("ip") or item.get("url")
+                    if key in seen:
+                        continue
+                    asset = dict(item)
+                    asset.setdefault("project_slug", e.get("project_slug"))
+                    assets.append(asset)
+                    seen.add(key)
+                    if len(assets) >= limit:
+                        break
+            if len(assets) >= limit:
+                break
+
+    # 过滤
+    if query:
+        assets = [a for a in assets if query in (a.get("host") or "").lower()
+                  or query in (a.get("ip") or "").lower()
+                  or query in (a.get("title") or "").lower()]
+
+    return jsonify({"total": len(assets), "assets": assets})
+
+
 @app.route("/api/analytics")
 def api_analytics():
     """数据可视化聚合：实验/任务/节点统计图表数据"""
