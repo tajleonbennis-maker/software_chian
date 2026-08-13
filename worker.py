@@ -282,7 +282,48 @@ class Worker:
 
 
 def main():
+    # 任务接收 HTTP 服务（大脑主动推送的通道）
+    from threading import Thread
+    from flask import Flask, request, jsonify
+
+    app = Flask(__name__)
     worker = Worker()
+
+    @app.route("/api/v1/tasks/run", methods=["POST"])
+    def run_task():
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        if token != NODE_TOKEN:
+            return jsonify({"error": "unauthorized"}), 401
+        task = request.get_json(silent=True) or {}
+        result = execute_task(task)
+        report = {
+            "node_id": NODE_ID,
+            "name": NODE_NAME,
+            "status": "ready",
+            "capabilities": CAPABILITIES,
+            "metrics": {"ts": time.time()},
+            "experiments": [result],
+        }
+        try:
+            worker._post("/api/lab/report", report)
+        except Exception as exc:
+            logger.warning("结果回传大脑失败: %s", exc)
+        return jsonify({"ok": True, "experiment_id": result.get("experiment_id"),
+                        "status": result.get("status")}), 200
+
+    @app.route("/health")
+    def health():
+        return jsonify({"node_id": NODE_ID, "status": "ready"})
+
+    def _run_http():
+        try:
+            app.run(host="0.0.0.0", port=5566, threaded=True)
+        except Exception as exc:
+            logger.error("HTTP 接收服务启动失败: %s", exc)
+
+    Thread(target=_run_http, daemon=True).start()
+    logger.info("任务接收服务已启动: 0.0.0.0:5566")
+
     def _stop(signum, frame):
         worker.stop_event.set()
         logger.info("收到信号，Worker 停止")
