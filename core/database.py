@@ -1,0 +1,487 @@
+"""SQLite persistence for scan tasks and reports."""
+import json
+import os
+import sqlite3
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
+
+class ScanDatabase:
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.Lock()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._initialize()
+
+    def _connect(self):
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize(self):
+        with self._connect() as db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS scan_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    query_text TEXT NOT NULL DEFAULT '',
+                    requested_size INTEGER NOT NULL DEFAULT 0,
+                    scan_api INTEGER NOT NULL DEFAULT 0,
+                    online_query INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    current_step TEXT NOT NULL DEFAULT '',
+                    analyzed_count INTEGER NOT NULL DEFAULT 0,
+                    total_count INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    results_json TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_scan_tasks_created ON scan_tasks(created_at DESC)")
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS research_projects (
+                    slug TEXT PRIMARY KEY, name TEXT NOT NULL, repository TEXT,
+                    upstream TEXT, license TEXT, discovery_query TEXT NOT NULL,
+                    category TEXT NOT NULL, priority REAL NOT NULL DEFAULT 50,
+                    rationale TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run_at REAL, next_run_at REAL, created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS research_runs (
+                    run_id TEXT PRIMARY KEY, project_slug TEXT NOT NULL,
+                    status TEXT NOT NULL, reason TEXT NOT NULL,
+                    discovered_count INTEGER NOT NULL DEFAULT 0,
+                    new_count INTEGER NOT NULL DEFAULT 0, error TEXT,
+                    started_at REAL NOT NULL, finished_at REAL
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS research_assets (
+                    identity TEXT NOT NULL, project_slug TEXT NOT NULL,
+                    asset_json TEXT NOT NULL, first_seen REAL NOT NULL,
+                    last_seen REAL NOT NULL, observation_count INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (identity, project_slug)
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS idx_research_runs_started ON research_runs(started_at DESC)")
+            db.execute("""CREATE TABLE IF NOT EXISTS lab_nodes (
+                node_id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
+                capabilities_json TEXT NOT NULL, metrics_json TEXT NOT NULL,
+                last_heartbeat REAL NOT NULL, created_at REAL NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS lab_experiments (
+                experiment_id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+                project_slug TEXT NOT NULL, project_name TEXT NOT NULL,
+                version TEXT, status TEXT NOT NULL, hypothesis TEXT NOT NULL,
+                public_observation TEXT, reproduction_summary TEXT,
+                evidence_json TEXT NOT NULL, remediation TEXT,
+                conclusion_boundary TEXT NOT NULL, created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS research_hypotheses (
+                hypothesis_id TEXT PRIMARY KEY, project_slug TEXT NOT NULL,
+                question TEXT NOT NULL, rationale TEXT NOT NULL,
+                method TEXT NOT NULL, expected_signal TEXT NOT NULL,
+                status TEXT NOT NULL, conclusion TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                metrics_json TEXT NOT NULL, model TEXT NOT NULL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_hypotheses_updated ON research_hypotheses(updated_at DESC)")
+            db.execute("""CREATE TABLE IF NOT EXISTS intelligence_signals (
+                signal_key TEXT PRIMARY KEY, source TEXT NOT NULL, name TEXT NOT NULL,
+                query_text TEXT NOT NULL, rank INTEGER NOT NULL, is_hot INTEGER NOT NULL,
+                hot_score REAL NOT NULL, momentum REAL NOT NULL,
+                status TEXT NOT NULL, decision_json TEXT, raw_json TEXT NOT NULL,
+                first_seen REAL NOT NULL, last_seen REAL NOT NULL,
+                observation_count INTEGER NOT NULL DEFAULT 1
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS intelligence_syncs (
+                sync_id TEXT PRIMARY KEY, source TEXT NOT NULL, status TEXT NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 0, promoted_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT, started_at REAL NOT NULL, finished_at REAL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_intelligence_seen ON intelligence_signals(last_seen DESC)")
+            asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
+            for name, definition in (
+                ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
+                ("analysis_json", "TEXT"), ("analyzed_at", "REAL"),
+                ("analysis_error", "TEXT"),
+            ):
+                if name not in asset_columns:
+                    db.execute(f"ALTER TABLE research_assets ADD COLUMN {name} {definition}")
+            project_columns = {row[1] for row in db.execute("PRAGMA table_info(research_projects)")}
+            for name, definition in (("insight_json", "TEXT"), ("insight_updated_at", "REAL"),
+                                     ("origin", "TEXT NOT NULL DEFAULT 'seed'"),
+                                     ("source_signal_key", "TEXT")):
+                if name not in project_columns:
+                    db.execute(f"ALTER TABLE research_projects ADD COLUMN {name} {definition}")
+            db.execute("""
+                UPDATE scan_tasks SET status='error', error='服务重启导致任务中断',
+                    current_step='任务已中断', updated_at=?
+                WHERE status IN ('pending', 'running')
+            """, (time.time(),))
+
+    def create_task(self, task_id: str, task: Dict[str, Any], metadata: Dict[str, Any]):
+        now = task.get("created_at", time.time())
+        with self._lock, self._connect() as db:
+            db.execute("""
+                INSERT INTO scan_tasks (
+                    task_id, mode, query_text, requested_size, scan_api, online_query,
+                    status, progress, current_step, analyzed_count, total_count, error,
+                    cancel_requested, results_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                task_id, metadata.get("mode", "manual"), metadata.get("query_text", ""),
+                metadata.get("requested_size", 0), bool(metadata.get("scan_api")),
+                bool(metadata.get("online_query")), task["status"], task["progress"],
+                task["current_step"], task["analyzed_count"], task["total_count"],
+                task.get("error"), bool(task.get("cancel_requested")), None, now, now,
+            ))
+
+    def update_task(self, task_id: str, changes: Dict[str, Any]):
+        allowed = {"status", "progress", "current_step", "analyzed_count", "total_count", "error", "cancel_requested"}
+        values = {key: value for key, value in changes.items() if key in allowed}
+        if "results" in changes:
+            values["results_json"] = json.dumps(changes["results"], ensure_ascii=False)
+        if not values:
+            return
+        values["updated_at"] = time.time()
+        columns = ", ".join(f"{key}=?" for key in values)
+        with self._lock, self._connect() as db:
+            db.execute(f"UPDATE scan_tasks SET {columns} WHERE task_id=?", (*values.values(), task_id))
+
+    def get_task(self, task_id: str, include_results: bool = True) -> Optional[Dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM scan_tasks WHERE task_id=?", (task_id,)).fetchone()
+        return self._row_to_dict(row, include_results) if row else None
+
+    def list_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM scan_tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [self._row_to_dict(row, False) for row in rows]
+
+    def seed_research_projects(self, projects: List[Dict[str, Any]]):
+        now = time.time()
+        with self._lock, self._connect() as db:
+            for project in projects:
+                db.execute("""
+                    INSERT INTO research_projects
+                    (slug,name,repository,upstream,license,discovery_query,category,priority,rationale,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(slug) DO UPDATE SET
+                    name=excluded.name, repository=excluded.repository,
+                    upstream=excluded.upstream, license=excluded.license,
+                    discovery_query=excluded.discovery_query, category=excluded.category,
+                    priority=excluded.priority, rationale=excluded.rationale,
+                    updated_at=excluded.updated_at
+                """, (project["slug"], project["name"], project.get("repository", ""),
+                      project.get("upstream", ""), project.get("license", ""),
+                      project["discovery_query"], project["category"], project["priority"],
+                      project["rationale"], now, now))
+
+    def upsert_trend_signal(self, signal: Dict[str, Any], decision: Dict[str, Any]) -> bool:
+        """Persist an immutable-ish raw observation and its latest research decision."""
+        now = time.time()
+        with self._lock, self._connect() as db:
+            exists = db.execute("SELECT 1 FROM intelligence_signals WHERE signal_key=?",
+                                (signal["signal_key"],)).fetchone()
+            db.execute("""INSERT INTO intelligence_signals
+                (signal_key,source,name,query_text,rank,is_hot,hot_score,momentum,status,
+                 decision_json,raw_json,first_seen,last_seen,observation_count)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                ON CONFLICT(signal_key) DO UPDATE SET rank=excluded.rank,is_hot=excluded.is_hot,
+                hot_score=excluded.hot_score,momentum=excluded.momentum,status=excluded.status,
+                decision_json=excluded.decision_json,raw_json=excluded.raw_json,
+                last_seen=excluded.last_seen,observation_count=observation_count+1""", (
+                signal["signal_key"], signal["source"], signal["name"], signal["query"],
+                signal["rank"], signal["is_hot"], signal["hot_score"], signal["momentum"],
+                decision.get("status", "observed"), json.dumps(decision, ensure_ascii=False),
+                json.dumps(signal["raw"], ensure_ascii=False), now, now))
+        return not bool(exists)
+
+    def upsert_dynamic_research_project(self, project: Dict[str, Any]):
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO research_projects
+                (slug,name,repository,upstream,license,discovery_query,category,priority,
+                 rationale,origin,source_signal_key,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(slug) DO UPDATE SET
+                name=excluded.name,discovery_query=excluded.discovery_query,
+                category=excluded.category,priority=excluded.priority,
+                rationale=excluded.rationale,origin=excluded.origin,
+                source_signal_key=excluded.source_signal_key,enabled=1,updated_at=excluded.updated_at""", (
+                project["slug"], project["name"], project.get("repository", ""),
+                project.get("upstream", "待研究"), project.get("license", "待研究"),
+                project["discovery_query"], project["category"], project["priority"],
+                project["rationale"], "trend", project["source_signal_key"], now, now))
+
+    def start_intelligence_sync(self, sync_id: str, source: str):
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO intelligence_syncs (sync_id,source,status,started_at) VALUES (?,?,?,?)",
+                       (sync_id, source, "running", time.time()))
+
+    def finish_intelligence_sync(self, sync_id: str, status: str, item_count: int = 0,
+                                 promoted_count: int = 0, error: str = ""):
+        with self._lock, self._connect() as db:
+            db.execute("""UPDATE intelligence_syncs SET status=?,item_count=?,promoted_count=?,
+                error=?,finished_at=? WHERE sync_id=?""",
+                (status, item_count, promoted_count, error[:1000], time.time(), sync_id))
+
+    def intelligence_overview(self, limit: int = 20) -> Dict[str, Any]:
+        with self._connect() as db:
+            signals = [dict(row) for row in db.execute("""SELECT name,rank,is_hot,hot_score,
+                momentum,status,last_seen,observation_count FROM intelligence_signals
+                ORDER BY last_seen DESC,is_hot DESC,hot_score DESC LIMIT ?""", (limit,)).fetchall()]
+            last_sync = db.execute("""SELECT status,item_count,promoted_count,error,started_at,finished_at
+                FROM intelligence_syncs ORDER BY started_at DESC LIMIT 1""").fetchone()
+        return {"signals": signals, "last_sync": dict(last_sync) if last_sync else None}
+
+    def next_research_project(self) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self._connect() as db:
+            row = db.execute("""
+                SELECT * FROM research_projects WHERE enabled=1 AND
+                (next_run_at IS NULL OR next_run_at<=?)
+                ORDER BY CASE WHEN last_run_at IS NULL THEN 0 ELSE 1 END,
+                         priority DESC, last_run_at ASC LIMIT 1
+            """, (now,)).fetchone()
+        return dict(row) if row else None
+
+    def start_research_run(self, run_id: str, project_slug: str, reason: str):
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO research_runs (run_id,project_slug,status,reason,started_at) VALUES (?,?,?,?,?)",
+                       (run_id, project_slug, "running", reason, time.time()))
+
+    def finish_research_run(self, run_id: str, project_slug: str, status: str,
+                            discovered: int = 0, new_count: int = 0, error: str = "",
+                            next_run_at: float = 0):
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("""UPDATE research_runs SET status=?, discovered_count=?, new_count=?,
+                       error=?, finished_at=? WHERE run_id=?""",
+                       (status, discovered, new_count, error[:1000], now, run_id))
+            db.execute("UPDATE research_projects SET last_run_at=?,next_run_at=?,updated_at=? WHERE slug=?",
+                       (now, next_run_at, now, project_slug))
+
+    def upsert_research_assets(self, project_slug: str, assets: List[Dict[str, Any]]) -> int:
+        now, new_count = time.time(), 0
+        with self._lock, self._connect() as db:
+            for asset in assets:
+                identity = (asset.get("url") or f"{asset.get('ip','')}:{asset.get('port',0)}").rstrip("/").lower()
+                if not identity:
+                    continue
+                exists = db.execute("SELECT 1 FROM research_assets WHERE identity=? AND project_slug=?",
+                                    (identity, project_slug)).fetchone()
+                if exists:
+                    db.execute("""UPDATE research_assets SET asset_json=?,last_seen=?,
+                               observation_count=observation_count+1 WHERE identity=? AND project_slug=?""",
+                               (json.dumps(asset, ensure_ascii=False), now, identity, project_slug))
+                else:
+                    new_count += 1
+                    db.execute("""INSERT INTO research_assets
+                        (identity,project_slug,asset_json,first_seen,last_seen,observation_count)
+                        VALUES (?,?,?,?,?,1)""",
+                               (identity, project_slug, json.dumps(asset, ensure_ascii=False), now, now))
+        return new_count
+
+    def pending_research_assets(self, project_slug: str, limit: int) -> List[Dict[str, Any]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("""SELECT identity,asset_json FROM research_assets
+                WHERE project_slug=? AND analysis_status IN ('pending','error')
+                ORDER BY first_seen ASC LIMIT ?""", (project_slug, limit)).fetchall()
+            identities = [row["identity"] for row in rows]
+            if identities:
+                placeholders = ",".join("?" for _ in identities)
+                db.execute(f"UPDATE research_assets SET analysis_status='running' WHERE project_slug=? AND identity IN ({placeholders})",
+                           (project_slug, *identities))
+        return [{"identity": row["identity"], "asset": json.loads(row["asset_json"])} for row in rows]
+
+    def next_project_with_pending_assets(self) -> Optional[Dict[str, Any]]:
+        """Pick the project whose pending queue has waited the longest."""
+        with self._connect() as db:
+            row = db.execute("""
+                SELECT p.*, MIN(a.first_seen) AS oldest_pending
+                FROM research_projects p JOIN research_assets a ON a.project_slug=p.slug
+                WHERE p.enabled=1 AND a.analysis_status IN ('pending','error')
+                GROUP BY p.slug ORDER BY oldest_pending ASC, p.priority DESC LIMIT 1
+            """).fetchone()
+        return dict(row) if row else None
+
+    def save_research_analysis(self, identity: str, project_slug: str,
+                               analysis: Optional[Dict[str, Any]], error: str = "",
+                               status: str = "completed"):
+        with self._lock, self._connect() as db:
+            db.execute("""UPDATE research_assets SET analysis_status=?,analysis_json=?,
+                       analyzed_at=?,analysis_error=? WHERE identity=? AND project_slug=?""",
+                       (status if analysis else "error",
+                        json.dumps(analysis, ensure_ascii=False) if analysis else None,
+                        time.time(), error[:1000], identity, project_slug))
+
+    def project_analysis_data(self, project_slug: str, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("""SELECT analysis_json FROM research_assets
+                WHERE project_slug=? AND analysis_status='completed' AND analysis_json IS NOT NULL
+                ORDER BY analyzed_at DESC LIMIT ?""", (project_slug, limit)).fetchall()
+        return [json.loads(row["analysis_json"]) for row in rows]
+
+    def save_project_insight(self, project_slug: str, insight: Dict[str, Any]):
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE research_projects SET insight_json=?,insight_updated_at=?,updated_at=? WHERE slug=?",
+                       (json.dumps(insight, ensure_ascii=False), time.time(), time.time(), project_slug))
+
+    def project_research_metrics(self, project_slug: str) -> Dict[str, Any]:
+        with self._connect() as db:
+            counts = {row[0]: row[1] for row in db.execute("""
+                SELECT analysis_status,COUNT(*) FROM research_assets
+                WHERE project_slug=? GROUP BY analysis_status
+            """, (project_slug,)).fetchall()}
+            samples = [json.loads(row[0]) for row in db.execute("""
+                SELECT analysis_json FROM research_assets WHERE project_slug=?
+                AND analysis_json IS NOT NULL ORDER BY analyzed_at DESC LIMIT 30
+            """, (project_slug,)).fetchall()]
+        total_decided = counts.get("completed", 0) + counts.get("rejected", 0)
+        confirmed = counts.get("completed", 0)
+        return {
+            "candidate_count": sum(counts.values()), "confirmed_count": confirmed,
+            "rejected_count": counts.get("rejected", 0),
+            "pending_count": counts.get("pending", 0) + counts.get("running", 0),
+            "confirmation_rate": round(confirmed / total_decided, 4) if total_decided else None,
+            "samples": [{
+                "confirmation": sample.get("project_confirmation", {}),
+                "technologies": [tech.get("name") for tech in sample.get("technologies", [])],
+                "api_count": len(sample.get("api_endpoints", [])),
+                "exposure_types": sorted({field for finding in sample.get("exposure_findings", [])
+                    for field in finding.get("sensitive_field_types", [])}),
+            } for sample in samples],
+        }
+
+    def save_research_hypothesis(self, hypothesis: Dict[str, Any]):
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO research_hypotheses
+                (hypothesis_id,project_slug,question,rationale,method,expected_signal,
+                 status,conclusion,confidence,metrics_json,model,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hypothesis_id) DO UPDATE SET
+                status=excluded.status,conclusion=excluded.conclusion,
+                confidence=excluded.confidence,metrics_json=excluded.metrics_json,
+                updated_at=excluded.updated_at""", (
+                hypothesis["hypothesis_id"], hypothesis["project_slug"], hypothesis["question"],
+                hypothesis["rationale"], hypothesis["method"], hypothesis["expected_signal"],
+                hypothesis.get("status", "active"), hypothesis.get("conclusion", ""),
+                hypothesis.get("confidence", 0),
+                json.dumps(hypothesis.get("metrics", {}), ensure_ascii=False),
+                hypothesis.get("model", "规则研究器"), now, now))
+
+    def recent_research_hypotheses(self, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._connect() as db:
+            rows = [dict(row) for row in db.execute("""SELECT h.*,p.name AS project_name
+                FROM research_hypotheses h JOIN research_projects p ON p.slug=h.project_slug
+                ORDER BY h.updated_at DESC LIMIT ?""", (limit,)).fetchall()]
+        for row in rows:
+            row["metrics"] = json.loads(row.pop("metrics_json"))
+        return rows
+
+    def analyzed_research_assets(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("""SELECT a.*,p.name AS project_name,p.upstream,p.repository,p.license
+                FROM research_assets a JOIN research_projects p ON p.slug=a.project_slug
+                WHERE a.analysis_status='completed' AND a.analysis_json IS NOT NULL
+                ORDER BY a.analyzed_at DESC LIMIT ?""", (limit,)).fetchall()
+        result = []
+        for row in rows:
+            item = json.loads(row["analysis_json"])
+            item["project_family"] = {
+                "name": row["project_name"], "upstream": row["upstream"],
+                "repository": row["repository"], "license": row["license"],
+                "deployment_relation": "第三方自行部署", "deployment_owner": "待确认",
+                "confidence": "medium", "evidence": ["项目专用发现规则与公开页面指纹"],
+                "notice": "上游项目归属不等于该公网实例的资产归属或安全责任。",
+            }
+            item.update({"first_seen": row["first_seen"], "last_seen": row["last_seen"],
+                         "scan_count": row["observation_count"], "research_managed": True})
+            result.append(item)
+        return result
+
+    def research_overview(self) -> Dict[str, Any]:
+        with self._connect() as db:
+            projects = [dict(row) for row in db.execute("""
+                SELECT p.*, COUNT(DISTINCT a.identity) AS asset_count,
+                    SUM(CASE WHEN a.analysis_status='completed' THEN 1 ELSE 0 END) AS analyzed_count,
+                    SUM(CASE WHEN a.analysis_status='pending' THEN 1 ELSE 0 END) AS pending_count,
+                    SUM(CASE WHEN a.analysis_status='rejected' THEN 1 ELSE 0 END) AS rejected_count
+                FROM research_projects p LEFT JOIN research_assets a ON a.project_slug=p.slug
+                GROUP BY p.slug ORDER BY p.priority DESC, p.name
+            """).fetchall()]
+            runs = [dict(row) for row in db.execute("""
+                SELECT r.*, p.name AS project_name FROM research_runs r
+                JOIN research_projects p ON p.slug=r.project_slug
+                ORDER BY r.started_at DESC LIMIT 30
+            """).fetchall()]
+        for project in projects:
+            project["insight"] = json.loads(project.pop("insight_json")) if project.get("insight_json") else None
+        return {"projects": projects, "runs": runs,
+                "hypotheses": self.recent_research_hypotheses(),
+                "intelligence": self.intelligence_overview(),
+                "total_candidate_assets": sum(row["asset_count"] for row in projects)}
+
+    def upsert_lab_report(self, report: Dict[str, Any]):
+        now = time.time()
+        node_id = report["node_id"]
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO lab_nodes
+                (node_id,name,status,capabilities_json,metrics_json,last_heartbeat,created_at)
+                VALUES (?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET
+                name=excluded.name,status=excluded.status,
+                capabilities_json=excluded.capabilities_json,
+                metrics_json=excluded.metrics_json,last_heartbeat=excluded.last_heartbeat""",
+                (node_id, report.get("name", node_id), report.get("status", "ready"),
+                 json.dumps(report.get("capabilities", []), ensure_ascii=False),
+                 json.dumps(report.get("metrics", {}), ensure_ascii=False), now, now))
+            for experiment in report.get("experiments", []):
+                db.execute("""INSERT INTO lab_experiments
+                    (experiment_id,node_id,project_slug,project_name,version,status,hypothesis,
+                     public_observation,reproduction_summary,evidence_json,remediation,
+                     conclusion_boundary,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(experiment_id) DO UPDATE SET
+                    status=excluded.status,version=excluded.version,
+                    reproduction_summary=excluded.reproduction_summary,
+                    evidence_json=excluded.evidence_json,remediation=excluded.remediation,
+                    updated_at=excluded.updated_at""",
+                    (experiment["experiment_id"], node_id, experiment["project_slug"],
+                     experiment["project_name"], experiment.get("version", "待确认"),
+                     experiment.get("status", "planned"), experiment["hypothesis"],
+                     experiment.get("public_observation", ""), experiment.get("reproduction_summary", ""),
+                     json.dumps(experiment.get("evidence", []), ensure_ascii=False),
+                     experiment.get("remediation", ""), experiment.get("conclusion_boundary",
+                     "靶场复现不等同于第三方公网实例已被利用。"), now, now))
+
+    def lab_overview(self) -> Dict[str, Any]:
+        with self._connect() as db:
+            nodes = [dict(row) for row in db.execute("SELECT * FROM lab_nodes ORDER BY last_heartbeat DESC").fetchall()]
+            experiments = [dict(row) for row in db.execute("SELECT * FROM lab_experiments ORDER BY updated_at DESC").fetchall()]
+        now = time.time()
+        for node in nodes:
+            node["capabilities"] = json.loads(node.pop("capabilities_json"))
+            node["metrics"] = json.loads(node.pop("metrics_json"))
+            node["online"] = now - node["last_heartbeat"] < 300
+        for experiment in experiments:
+            experiment["evidence"] = json.loads(experiment.pop("evidence_json"))
+        return {"nodes": nodes, "experiments": experiments}
+
+    @staticmethod
+    def _row_to_dict(row, include_results: bool) -> Dict[str, Any]:
+        item = dict(row)
+        raw_results = item.pop("results_json", None)
+        item["cancel_requested"] = bool(item["cancel_requested"])
+        item["scan_api"] = bool(item["scan_api"])
+        item["online_query"] = bool(item["online_query"])
+        if include_results:
+            item["results"] = json.loads(raw_results) if raw_results else None
+        return item
