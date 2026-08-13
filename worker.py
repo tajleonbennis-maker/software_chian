@@ -23,7 +23,9 @@ from typing import Any, Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+# 优先加载 worker 专属配置，再加载默认 .env（如果存在）
+load_dotenv(".env.worker", override=True)
+load_dotenv(".env", override=False)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +54,7 @@ SCAN_TIMEOUT = int(os.environ.get("SCAN_TIMEOUT", "10"))
 def _headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {NODE_TOKEN}",
+        "X-Lab-Token": NODE_TOKEN,
         "Content-Type": "application/json",
         "X-Node-Id": NODE_ID,
     }
