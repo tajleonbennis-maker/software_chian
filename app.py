@@ -1448,6 +1448,27 @@ def api_assets():
     return jsonify({"total": len(assets), "assets": assets})
 
 
+@app.route("/api/leaks")
+def api_leaks():
+    """凭据泄露查询（专属数据表 credential_leaks）"""
+    limit = min(int(request.args.get("limit", "100")), 500)
+    status = request.args.get("status", "")
+    target = request.args.get("target", "")
+    leaks = scan_database.list_credential_leaks(limit=limit, status=status, target=target)
+    # 默认不返回完整 key（前端展示用 masked）
+    full = request.args.get("full") == "1"
+    if not full:
+        for l in leaks:
+            l.pop("api_key_full", None)
+    return jsonify({"total": len(leaks), "leaks": leaks})
+
+
+@app.route("/api/leaks/stats")
+def api_leaks_stats():
+    """凭据泄露统计"""
+    return jsonify(scan_database.credential_leak_stats())
+
+
 @app.route("/api/analytics")
 def api_analytics():
     """数据可视化聚合：实验/任务/节点统计图表数据"""
@@ -1594,7 +1615,53 @@ def api_lab_report():
     if not report.get("node_id"):
         return jsonify({"error": "node_id required"}), 400
     scan_database.upsert_lab_report(report)
-    return jsonify({"ok": True})
+
+    # 解析 evidence 中的凭据泄露（api_crawl 任务的 secrets）→ 写入 credential_leaks 表
+    node_id = report.get("node_id", "")
+    leak_count = 0
+    for experiment in report.get("experiments", []):
+        for item in experiment.get("evidence", []):
+            secrets = item.get("secrets", []) if isinstance(item, dict) else []
+            for s in secrets:
+                leak = {
+                    "target": s.get("source_url") or item.get("target", ""),
+                    "node_id": node_id,
+                    "provider": s.get("provider", "unknown"),
+                    "base_url": s.get("base_url", ""),
+                    "api_key_masked": s.get("key_masked", ""),
+                    "api_key_full": s.get("api_key", ""),
+                    "secret_type": "LLM API Key",
+                    "source_path": s.get("path", ""),
+                    "evidence": [{"url": s.get("source_url", ""), "path": s.get("path", "")}],
+                    "status": "new",
+                }
+                if leak["api_key_full"]:
+                    scan_database.upsert_credential_leak(leak)
+                    leak_count += 1
+            # deep_analysis 的 panel/js 扫描结果也入库
+            for hit in item.get("panel_secret_scan", []) + item.get("js_secret_scan", []) or []:
+                if not isinstance(hit, dict):
+                    continue
+                api_key = ""
+                # 从 value_masked 无法还原，但 source_url/secret_type 有价值
+                leak = {
+                    "target": item.get("target", ""),
+                    "node_id": node_id,
+                    "provider": hit.get("app", "unknown"),
+                    "base_url": hit.get("source", "") or hit.get("url", ""),
+                    "api_key_masked": hit.get("value_masked", ""),
+                    "api_key_full": "",
+                    "secret_type": hit.get("secret_type", "敏感信息"),
+                    "source_path": hit.get("path", ""),
+                    "evidence": [{"type": hit.get("type", ""), "matched": hit.get("matched", "")}],
+                    "status": "new",
+                }
+                scan_database.upsert_credential_leak(leak)
+                leak_count += 1
+    if leak_count:
+        logger.info("lab report: 新增 %d 条凭据泄露记录", leak_count)
+
+    return jsonify({"ok": True, "leaks_ingested": leak_count})
 
 # ============================================================
 # 定期清理过期任务（简单的内存管理）
