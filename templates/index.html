@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>软件供应链安全分析平台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260813-3') }}">
+</head>
+<body>
+    <!-- ============================================================
+         顶部导航栏
+         ============================================================ -->
+    <header class="navbar">
+        <div class="navbar-container">
+            <div class="navbar-brand">
+                <span class="navbar-logo">&#128737;</span>
+                <div class="navbar-title-group">
+                    <h1 class="navbar-title">软件供应链安全分析平台</h1>
+                    <p class="navbar-subtitle">Software Supply Chain Security Analysis Platform</p>
+                </div>
+            </div>
+            <div class="navbar-status">
+                <span id="aiStatusBadge" class="status-badge admin-only hidden">AI 检测中...</span>
+                <span id="fofaStatusBadge" class="status-badge admin-only hidden">资产数据源检测中...</span>
+                <div class="nav-right">
+                    <span id="userRole" class="role-badge guest">只读</span>
+                    <button id="loginBtnNav" class="btn-login">管理员登录</button>
+                    <button id="logoutBtnNav" class="btn-login btn-logout hidden">登出</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- ============================================================
+         主内容区
+         ============================================================ -->
+    <main class="main-content">
+
+        <section class="showcase-section" id="showcaseSection">
+            <div class="showcase-heading">
+                <div>
+                    <span class="eyebrow">OPEN-SOURCE EXPOSURE INTELLIGENCE</span>
+                    <h2>开源项目安全观测</h2>
+                    <p id="showcaseNotice">正在加载最新扫描成果...</p>
+                </div>
+                <span id="showcaseUpdated" class="showcase-updated"></span>
+            </div>
+            <div class="fofa-searchbar">
+                <span class="fofa-search-icon">⌕</span>
+                <input id="publicAssetSearch" type="search" placeholder="搜索 IP、域名、URL、标题、组件或 CVE">
+                <select id="publicRiskFilter" aria-label="风险筛选">
+                    <option value="">全部风险</option><option value="CRITICAL">严重</option><option value="HIGH">高危</option><option value="MEDIUM">中危</option><option value="LOW">低危</option><option value="INFO">信息</option>
+                </select>
+                <button type="button" class="fofa-search-button">搜索</button>
+            </div>
+            <div id="publicSummary" class="public-summary"></div>
+            <section class="research-intelligence">
+                <div class="research-heading"><div><span class="eyebrow">AUTONOMOUS RESEARCH</span><h3>自主研究动态</h3></div><span id="researchBrainStatus"></span></div>
+                <div id="researchProjects" class="research-projects"><span class="muted">正在加载研究计划...</span></div>
+                <div id="researchTrends" class="research-trends"></div>
+                <div id="researchRuns" class="research-runs"></div>
+            </section>
+            <section class="lab-intelligence">
+                <div class="research-heading"><div><span class="eyebrow">REPRODUCTION LAB</span><h3>同源安全复现实验室</h3></div><span id="labStatus">正在加载靶场状态...</span></div>
+                <div id="labExperiments" class="lab-experiments"></div>
+            </section>
+            <div class="fofa-layout">
+                <aside class="fofa-sidebar">
+                    <div class="facet"><h4>风险发现</h4><div id="riskFacets"></div></div>
+                    <div class="facet"><h4>开源项目 / 产品指纹</h4><div id="techFacets"></div></div>
+                    <div class="facet"><h4>协议</h4><div id="protocolFacets"></div></div>
+                    <div class="facet"><h4>国家 / 地区</h4><div id="countryFacets"></div></div>
+                </aside>
+                <section class="fofa-results">
+                    <div class="result-toolbar"><span id="resultCount">0 条结果</span><span>按公开证据分级，未验证的组件匹配不等于漏洞成立</span></div>
+                    <div id="showcaseAssets" class="showcase-assets"></div>
+                </section>
+            </div>
+        </section>
+
+        <!-- ========================================================
+             查询输入区
+             ======================================================== -->
+        <section class="card query-section admin-workspace admin-only hidden" id="querySection">
+            <div class="query-heading">
+                <div>
+                    <h2 class="card-title">扫描资产</h2>
+                    <p class="section-intro">输入你有权测试的 URL，或使用已配置的外部资产数据源。</p>
+                </div>
+                <span id="scanPermissionHint" class="permission-hint">登录管理员后可开始扫描</span>
+            </div>
+
+            <!-- 模式切换标签 -->
+            <div class="mode-tabs">
+                <button class="mode-tab active" data-mode="manual" id="tabManual">
+                    输入 URL
+                </button>
+                <button class="mode-tab" data-mode="fofa" id="tabFofa">
+                    外部资产发现
+                </button>
+            </div>
+
+            <!-- FOFA 搜索模式 -->
+            <div class="mode-content hidden" id="fofaModeContent">
+                <div class="form-group">
+                    <label for="fofaQuery">资产查询语句</label>
+                    <input type="text" id="fofaQuery" class="form-input"
+                           placeholder='例如: title="管理后台" 或 port="8080" &amp;&amp; server="Apache"'
+                           value="">
+                    <p class="form-hint">输入资产搜索语法来发现网络资产</p>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group form-group-small">
+                        <label for="fofaSize">结果数量</label>
+                        <input type="number" id="fofaSize" class="form-input"
+                               value="{{ fofa_key_configured and 100 or 20 }}" min="1">
+                        <p class="form-hint">由管理员自定义；大量资产会增加数据配额和扫描时间。</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="fofaKey">数据源访问凭据（可选）</label>
+                        <input type="password" id="fofaKey" class="form-input"
+                               placeholder="留空则使用环境变量" value="{{ fofa_key_configured }}">
+                    </div>
+                </div>
+            </div>
+
+            <!-- 手动输入模式 -->
+            <div class="mode-content" id="manualModeContent">
+                <div class="form-group">
+                    <label for="manualUrls">URL 列表（每行一个）</label>
+                    <textarea id="manualUrls" class="form-textarea" rows="6"
+                              placeholder="http://example.com&#10;https://192.168.1.1:8080&#10;http://10.0.0.5"></textarea>
+                    <p class="form-hint">直接输入目标 URL，每行一个，无需使用外部资产数据源</p>
+                </div>
+            </div>
+
+            <!-- 分析选项 -->
+            <div class="form-options">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="scanApi">
+                    <span>探测常见 API 端点（增加耗时）</span>
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" id="onlineQuery">
+                    <span>在线查询 NVD/OSV（较慢）</span>
+                </label>
+            </div>
+
+            <!-- 开始分析按钮 -->
+            <div class="form-actions">
+                <button type="button" class="btn btn-primary admin-only" id="startAnalysisBtn">
+                    &#9654; 开始分析
+                </button>
+            </div>
+        </section>
+
+        <!-- ========================================================
+             进度显示区
+             ======================================================== -->
+        <section class="card progress-section admin-only hidden" id="progressSection">
+            <h2 class="card-title">&#9881; 分析进度</h2>
+            <div class="progress-info">
+                <span id="progressStep" class="progress-step">正在准备...</span>
+                <span id="progressCount" class="progress-count"></span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                <span class="progress-text" id="progressText">0%</span>
+            </div>
+            <div class="progress-actions">
+                <button type="button" class="btn btn-secondary" id="cancelAnalysisBtn">取消分析</button>
+            </div>
+        </section>
+
+        <!-- ========================================================
+             错误提示区
+         ======================================================== -->
+        <section class="card error-section admin-only hidden" id="errorSection">
+            <h2 class="card-title error-title">&#9888; 分析出错</h2>
+            <p class="error-message" id="errorMessage"></p>
+        </section>
+
+        <!-- ========================================================
+             结果展示区
+             ======================================================== -->
+        <section class="results-section admin-only hidden" id="resultsSection">
+
+            <!-- 汇总卡片 -->
+            <div class="summary-cards" id="summaryCards">
+                <!-- 由 JS 动态填充 -->
+            </div>
+
+            <!-- ========================================================
+                 AI 深度分析面板（仅当配置了 DeepSeek API 时展示）
+                 ======================================================== -->
+            <div class="card ai-analysis-panel hidden" id="aiAnalysisPanel">
+                <h2 class="card-title ai-panel-title">&#129504; AI 深度安全分析</h2>
+                <div id="aiAnalysisContent">
+                    <!-- 由 JS 动态填充 -->
+                </div>
+            </div>
+
+            <!-- 严重等级分布图 -->
+            <div class="card">
+                <h2 class="card-title">&#128202; 严重等级分布</h2>
+                <div class="severity-chart" id="severityChart">
+                    <!-- 由 JS 动态填充 -->
+                </div>
+            </div>
+
+            <!-- 资产列表表格 -->
+            <div class="card">
+                <h2 class="card-title">&#128187; 资产分析结果</h2>
+                <div class="table-container">
+                    <table class="asset-table">
+                        <thead>
+                            <tr>
+                                <th>URL / 主机</th>
+                                <th>IP</th>
+                                <th>标题</th>
+                                <th>检测技术</th>
+                                <th>漏洞数</th>
+                                <th>风险等级</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="assetTableBody">
+                            <!-- 由 JS 动态填充 -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ============================================================
+         资产详情模板（用于 JS 动态渲染，默认隐藏）
+         ============================================================ -->
+    <template id="assetDetailTemplate">
+        <div class="asset-detail">
+            <!-- 标签页导航 -->
+            <div class="detail-tabs">
+                <button class="detail-tab active" data-tab="tech">技术栈</button>
+                <button class="detail-tab" data-tab="supply">供应链</button>
+                <button class="detail-tab" data-tab="vuln">漏洞</button>
+                <button class="detail-tab" data-tab="exploit">利用方式</button>
+                <button class="detail-tab" data-tab="api">API 安全</button>
+            </div>
+
+            <!-- 技术栈 -->
+            <div class="detail-panel active" data-panel="tech">
+                <table class="detail-table">
+                    <thead>
+                        <tr><th>技术名称</th><th>版本</th><th>分类</th><th>厂商</th><th>供应链</th></tr>
+                    </thead>
+                    <tbody class="tech-tbody"></tbody>
+                </table>
+            </div>
+
+            <!-- 供应链 -->
+            <div class="detail-panel" data-panel="supply">
+                <div class="supply-chain-list"></div>
+            </div>
+
+            <!-- 漏洞 -->
+            <div class="detail-panel" data-panel="vuln">
+                <div class="vuln-list"></div>
+            </div>
+
+            <!-- 利用方式 -->
+            <div class="detail-panel" data-panel="exploit">
+                <div class="exploit-list"></div>
+            </div>
+
+            <!-- API 安全 -->
+            <div class="detail-panel" data-panel="api">
+                <div class="api-report"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ============================================================
+         登录模态框
+         ============================================================ -->
+    <div id="loginModal" class="modal">
+        <div class="modal-content">
+            <span class="modal-close" id="loginModalClose">&times;</span>
+            <h3>管理员登录</h3>
+            <p class="login-hint">登录后可以创建和取消扫描任务。</p>
+            <div id="passwordField">
+                <input type="password" id="adminPassword" placeholder="管理员密码">
+            </div>
+            {% if not admin_password_configured %}
+            <p class="security-warning">ADMIN_PASSWORD 尚未配置，本地临时密码为 admin123。请尽快在 .env 中修改。</p>
+            {% endif %}
+            <button id="loginSubmitBtn" class="btn-primary btn-login-submit">登录</button>
+            <div id="loginError" class="error-msg"></div>
+        </div>
+    </div>
+
+    <!-- 底部 -->
+    <footer class="footer">
+        <p>软件供应链安全分析平台 &copy; 2026 | 仅供安全研究和防御分析使用</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/app.js', v='20260813-3') }}"></script>
+</body>
+</html>
