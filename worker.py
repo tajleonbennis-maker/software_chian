@@ -218,6 +218,64 @@ def asdict_safe(obj):
 # ============================================================
 # Worker 主循环
 # ============================================================
+def _collect_system_metrics() -> Dict[str, Any]:
+    """采集本机系统资源指标（CPU/内存/磁盘/负载）"""
+    metrics: Dict[str, Any] = {"ts": time.time(), "pid": os.getpid()}
+    try:
+        # CPU / 负载
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            metrics["load1"], metrics["load5"], metrics["load15"] = (
+                float(parts[0]), float(parts[1]), float(parts[2]))
+    except Exception:
+        pass
+    try:
+        # 内存
+        with open("/proc/meminfo") as f:
+            mem = {}
+            for line in f:
+                k, _, v = line.partition(":")
+                mem[k.strip()] = int(v.strip().split()[0]) * 1024
+            metrics["mem_total"] = mem.get("MemTotal", 0)
+            metrics["mem_available"] = mem.get("MemAvailable", 0)
+            metrics["mem_used"] = max(0, mem.get("MemTotal", 0) - mem.get("MemAvailable", 0))
+    except Exception:
+        pass
+    try:
+        # CPU 使用率（采样）
+        def _cpu_sample():
+            with open("/proc/stat") as f:
+                line = f.readline()
+                parts = list(map(int, line.split()[1:]))
+            idle = parts[3] + (parts[4] if len(parts) > 4 else 0)
+            total = sum(parts)
+            return idle, total
+        i1, t1 = _cpu_sample()
+        time.sleep(0.3)
+        i2, t2 = _cpu_sample()
+        d_total = t2 - t1
+        if d_total > 0:
+            metrics["cpu_percent"] = round((1 - (i2 - i1) / d_total) * 100, 1)
+    except Exception:
+        pass
+    try:
+        # 磁盘
+        import shutil
+        du = shutil.disk_usage("/")
+        metrics["disk_total"] = du.total
+        metrics["disk_free"] = du.free
+        metrics["disk_used"] = du.used
+    except Exception:
+        pass
+    try:
+        # 系统运行时长
+        with open("/proc/uptime") as f:
+            metrics["uptime"] = float(f.read().split()[0])
+    except Exception:
+        pass
+    return metrics
+
+
 class Worker:
     def __init__(self):
         self.stop_event = threading.Event()
@@ -229,13 +287,13 @@ class Worker:
         return resp.json()
 
     def heartbeat(self):
-        """向大脑上报心跳与能力"""
+        """向大脑上报心跳与能力（含系统资源指标）"""
         payload = {
             "node_id": NODE_ID,
             "name": NODE_NAME,
             "status": "ready",
             "capabilities": CAPABILITIES,
-            "metrics": {"ts": time.time(), "pid": os.getpid()},
+            "metrics": _collect_system_metrics(),
             "experiments": [],
         }
         try:
@@ -301,7 +359,7 @@ def main():
             "name": NODE_NAME,
             "status": "ready",
             "capabilities": CAPABILITIES,
-            "metrics": {"ts": time.time()},
+            "metrics": _collect_system_metrics(),
             "experiments": [result],
         }
         try:
