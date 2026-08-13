@@ -100,7 +100,23 @@ a { color: #60a5fa; text-decoration: none; }
   <div class="charts">
     <div class="chart-card"><h3>实验状态分布</h3><div id="chart-status"><div style="color:#8a94a8">加载中...</div></div></div>
     <div class="chart-card"><h3>各节点实验数</h3><div id="chart-node"><div style="color:#8a94a8">加载中...</div></div></div>
-    <div class="chart-card"><h3>最近实验结果</h3><div class="experiment-list" id="exp-list"><div style="color:#8a94a8">加载中...</div></div></div>
+    <div class="chart-card"><h3>各项目实验数</h3><div id="chart-project"><div style="color:#8a94a8">加载中...</div></div></div>
+  </div>
+
+  <div class="section-title"><span class="dot"></span> 扫描结果展示</div>
+  <div class="charts">
+    <div class="chart-card" style="grid-column: 1/-1;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0">实验结果列表</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <select id="exp-node-filter" onchange="loadExperiments()" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;">
+            <option value="">全部节点</option>
+          </select>
+          <button onclick="loadExperiments()" style="background:#232d45;color:#c3cad9;border:1px solid #2a3550;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;">刷新</button>
+        </div>
+      </div>
+      <div class="experiment-list" id="exp-list"><div style="color:#8a94a8">加载中...</div></div>
+    </div>
   </div>
 
   <div class="section-title"><span class="dot"></span> 与大脑对话</div>
@@ -186,21 +202,93 @@ async function loadMonitor() {
     grid.appendChild(card);
   });
 
-  // 实验列表
-  const expList = document.getElementById('exp-list');
-  expList.innerHTML = '';
-  if (!d.recent_experiments.length) { expList.innerHTML = '<div style="color:#8a94a8">暂无实验</div>'; }
-  d.recent_experiments.slice(0, 8).forEach(e => {
+  // 节点下拉过滤选项
+  const filter = document.getElementById('exp-node-filter');
+  if (filter.options.length <= 1) {
+    d.nodes.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n.node_id;
+      opt.textContent = n.name + ' (' + n.node_id + ')';
+      filter.appendChild(opt);
+    });
+  }
+}
+
+// 渲染单条实验详情（evidence 展示）
+function renderEvidence(ev) {
+  if (!Array.isArray(ev) || !ev.length) return '<div style="color:#8a94a8;padding:8px 0">无 evidence 数据</div>';
+  return ev.map((item, i) => {
+    const target = item.target || item.url || item.host || ('条目 ' + (i+1));
+    const rows = [];
+    // 技术栈
+    if (item.technologies && item.technologies.length) {
+      const techs = item.technologies.map(t => (t.name||t) + (t.version?(' '+t.version):'') + (t.category?(' <span style="color:#8a94a8">['+t.category+']</span>'):'')).join('，');
+      rows.push(`<div class="metric-row"><span class="k">技术栈</span><span class="v">${escapeHtml(techs)}</span></div>`);
+    }
+    // 漏洞
+    if (item.vulnerabilities && item.vulnerabilities.length) {
+      const vulns = item.vulnerabilities.map(v => {
+        const id = v.cve_id || v.id || v.name || '漏洞';
+        const sev = v.severity ? ` <span style="color:#f87171">[${v.severity}]</span>` : '';
+        return escapeHtml(id) + sev;
+      }).join('<br>');
+      rows.push(`<div class="metric-row"><span class="k">漏洞</span><span class="v" style="text-align:right">${vulns}</span></div>`);
+    }
+    // API 报告
+    if (item.report) {
+      const r = item.report;
+      const risk = r.risk_level ? ` <span style="color:${r.risk_level==='高'?'#f87171':r.risk_level==='中'?'#fbbf24':'#4ade80'}">[风险:${r.risk_level}]</span>` : '';
+      rows.push(`<div class="metric-row"><span class="k">API 报告</span><span class="v">${escapeHtml(r.summary||r.total_endpoints||'')}${risk}</span></div>`);
+    }
+    // 错误
+    if (item.error) {
+      rows.push(`<div class="metric-row"><span class="k">错误</span><span class="v" style="color:#f87171">${escapeHtml(item.error)}</span></div>`);
+    }
+    // 其他字段
+    const others = Object.entries(item).filter(([k]) => !['target','url','host','technologies','vulnerabilities','report','error'].includes(k));
+    others.forEach(([k,v]) => {
+      if (v === null || v === undefined || v === '') return;
+      const vs = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      if (vs.length > 200) return;
+      rows.push(`<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(vs)}</span></div>`);
+    });
+    if (!rows.length) {
+      rows.push(`<div style="color:#8a94a8;padding:6px 0">${escapeHtml(JSON.stringify(item))}</div>`);
+    }
+    return `<div style="background:#0f1420;border:1px solid #232d45;border-radius:8px;padding:8px 12px;margin:6px 0;">
+      <div style="font-family:monospace;color:#60a5fa;font-size:12px;margin-bottom:4px;">${escapeHtml(target)}</div>
+      ${rows.join('')}
+    </div>`;
+  }).join('');
+}
+
+async function loadExperiments() {
+  const filter = document.getElementById('exp-node-filter');
+  const nodeId = filter.value;
+  const url = nodeId ? '/api/experiments?node_id=' + nodeId : '/api/experiments';
+  const d = await api(url);
+  const list = document.getElementById('exp-list');
+  list.innerHTML = '';
+  if (!d.experiments || !d.experiments.length) { list.innerHTML = '<div style="color:#8a94a8">暂无实验结果</div>'; return; }
+  d.experiments.forEach(e => {
     const item = document.createElement('div');
     item.className = 'exp-item';
+    item.style.display = 'block';
     item.innerHTML = `
-      <div class="exp-left">
-        <div>${e.project_name||e.project_slug||'未知项目'}</div>
-        <div style="color:#8a94a8;font-size:12px">${e.node_id||''} · ${(e.public_observation||'').slice(0,60)}</div>
+      <div style="display:flex;justify-content:space-between;cursor:pointer;" onclick="this.parentElement.querySelector('.exp-detail').style.display = this.parentElement.querySelector('.exp-detail').style.display==='none'?'block':'none'">
+        <div class="exp-left">
+          <div><strong>${escapeHtml(e.project_name||e.project_slug||'未知项目')}</strong> <span style="color:#8a94a8;font-size:12px">${e.node_id||''} · ${new Date((e.created_at||0)*1000).toLocaleString()}</span></div>
+          <div style="color:#8a94a8;font-size:12px">${escapeHtml((e.public_observation||e.hypothesis||'').slice(0,80))}</div>
+        </div>
+        <span class="exp-status ${e.status}">${e.status} ▾</span>
       </div>
-      <span class="exp-status ${e.status}">${e.status}</span>
+      <div class="exp-detail" style="display:none;margin-top:10px;">
+        <div class="metric-row"><span class="k">实验 ID</span><span class="v">${e.experiment_id||''}</span></div>
+        ${e.reproduction_summary ? `<div class="metric-row"><span class="k">摘要</span><span class="v">${escapeHtml(String(e.reproduction_summary).slice(0,120))}</span></div>` : ''}
+        ${renderEvidence(e.evidence)}
+      </div>
     `;
-    expList.appendChild(item);
+    list.appendChild(item);
   });
 }
 
@@ -224,6 +312,16 @@ async function loadAnalytics() {
     return `<div class="metric-row"><span class="k">${k}</span><span class="v">${v} 条</span></div>
             <div class="bar"><div class="bar-fill cpu" style="width:${p}%"></div></div>`;
   }).join('') || '<div style="color:#8a94a8">暂无数据</div>';
+
+  // 项目分布
+  const projectEl = document.getElementById('chart-project');
+  const byProject = d.by_project || {};
+  const projTotal = Object.values(byProject).reduce((a,b)=>a+b,0);
+  projectEl.innerHTML = Object.entries(byProject).map(([k,v]) => {
+    const p = projTotal?Math.round(v/projTotal*100):0;
+    return `<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${v} 条</span></div>
+            <div class="bar"><div class="bar-fill mem" style="width:${p}%"></div></div>`;
+  }).join('') || '<div style="color:#8a94a8">暂无数据</div>';
 }
 
 async function sendChat() {
@@ -244,8 +342,10 @@ function escapeHtml(s) {
 
 loadMonitor();
 loadAnalytics();
+loadExperiments();
 setInterval(loadMonitor, 5000);   // 5 秒刷新实时状态
 setInterval(loadAnalytics, 10000); // 10 秒刷新图表
+setInterval(loadExperiments, 15000); // 15 秒刷新实验结果
 </script>
 </body>
 </html>
