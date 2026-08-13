@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>大脑监控中心 - Supply Chain Distributed</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1420; color: #e8eaf0; min-height: 100vh; }
+.header { background: linear-gradient(135deg, #1a2333 0%, #0f1420 100%); padding: 20px 32px; border-bottom: 1px solid #2a3550; display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header .sub { color: #8a94a8; font-size: 13px; margin-top: 4px; }
+.container { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+
+.summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.sum-card { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 18px; }
+.sum-card .num { font-size: 28px; font-weight: 700; margin-top: 6px; }
+.sum-card .label { color: #8a94a8; font-size: 13px; }
+.sum-card .num.green { color: #4ade80; }
+.sum-card .num.orange { color: #fbbf24; }
+.sum-card .num.red { color: #f87171; }
+.sum-card .num.blue { color: #60a5fa; }
+
+.section-title { font-size: 16px; font-weight: 600; margin: 24px 0 12px; display: flex; align-items: center; gap: 8px; }
+.section-title .dot { width: 8px; height: 8px; border-radius: 50%; background: #60a5fa; }
+
+.nodes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.node-card { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; }
+.node-card .node-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.node-card .node-name { font-weight: 600; font-size: 15px; }
+.node-card .node-id { color: #8a94a8; font-size: 12px; font-family: monospace; }
+.status-badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+.status-badge.online { background: rgba(74, 222, 128, .15); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
+.status-badge.offline { background: rgba(248, 113, 113, .15); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
+
+.metric-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; border-bottom: 1px solid #232d45; }
+.metric-row:last-child { border-bottom: none; }
+.metric-row .k { color: #8a94a8; }
+.metric-row .v { font-family: monospace; }
+
+.bar { height: 6px; background: #232d45; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.bar-fill { height: 100%; border-radius: 3px; transition: width .5s; }
+.bar-fill.cpu { background: linear-gradient(90deg, #60a5fa, #3b82f6); }
+.bar-fill.mem { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.bar-fill.disk { background: linear-gradient(90deg, #4ade80, #22c55e); }
+
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 16px; }
+.chart-card { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; }
+.chart-card h3 { font-size: 14px; margin-bottom: 12px; color: #c3cad9; }
+
+.chat-box { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; margin-top: 16px; }
+.chat-box .chat-history { max-height: 240px; overflow-y: auto; margin-bottom: 12px; }
+.chat-box .msg { margin-bottom: 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px; white-space: pre-wrap; }
+.chat-box .msg.user { background: #22304e; text-align: right; }
+.chat-box .msg.bot { background: #1d2740; }
+.chat-box .chat-input { display: flex; gap: 8px; }
+.chat-box input { flex: 1; background: #0f1420; border: 1px solid #2a3550; color: #e8eaf0; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+.chat-box button { background: #3b82f6; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+.chat-box button:hover { background: #2563eb; }
+
+.quick-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.quick-actions button { background: #232d45; color: #c3cad9; border: 1px solid #2a3550; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.quick-actions button:hover { background: #2a3550; color: #fff; }
+
+.experiment-list { margin-top: 16px; }
+.exp-item { background: #1a2333; border: 1px solid #2a3550; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; display: flex; justify-content: space-between; }
+.exp-item .exp-left { flex: 1; margin-right: 12px; }
+.exp-item .exp-status { font-weight: 600; }
+.exp-status.completed { color: #4ade80; }
+.exp-status.error { color: #f87171; }
+.exp-status.planned { color: #fbbf24; }
+
+.tip { color: #8a94a8; font-size: 12px; margin-top: 8px; }
+a { color: #60a5fa; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>🧠 大脑监控中心</h1>
+    <div class="sub">Supply Chain Distributed Execution · 实时状态</div>
+  </div>
+  <div class="tip">Token 配置于服务端 · <a href="/api/lab/overview" target="_blank">API 原始数据</a></div>
+</div>
+
+<div class="container">
+  <div class="summary-cards">
+    <div class="sum-card"><div class="label">节点总数</div><div class="num blue" id="s-nodes">-</div></div>
+    <div class="sum-card"><div class="label">在线节点</div><div class="num green" id="s-online">-</div></div>
+    <div class="sum-card"><div class="label">实验总数</div><div class="num" id="s-exp">-</div></div>
+    <div class="sum-card"><div class="label">完成实验</div><div class="num green" id="s-exp-ok">-</div></div>
+    <div class="sum-card"><div class="label">失败实验</div><div class="num red" id="s-exp-err">-</div></div>
+    <div class="sum-card"><div class="label">最近任务</div><div class="num orange" id="s-tasks">-</div></div>
+  </div>
+
+  <div class="section-title"><span class="dot"></span> 执行引擎实时状态</div>
+  <div class="nodes-grid" id="nodes-grid"><div style="color:#8a94a8">加载中...</div></div>
+
+  <div class="section-title"><span class="dot"></span> 数据可视化</div>
+  <div class="charts">
+    <div class="chart-card"><h3>实验状态分布</h3><div id="chart-status"><div style="color:#8a94a8">加载中...</div></div></div>
+    <div class="chart-card"><h3>各节点实验数</h3><div id="chart-node"><div style="color:#8a94a8">加载中...</div></div></div>
+    <div class="chart-card"><h3>最近实验结果</h3><div class="experiment-list" id="exp-list"><div style="color:#8a94a8">加载中...</div></div></div>
+  </div>
+
+  <div class="section-title"><span class="dot"></span> 与大脑对话</div>
+  <div class="chat-box">
+    <div class="chat-history" id="chat-history">
+      <div class="msg bot">你好！我是大脑控制台。你可以让我查看节点状态、统计实验数据，或下发扫描任务。</div>
+    </div>
+    <div class="chat-input">
+      <input id="chat-input" placeholder="例如：查看所有节点状态 / 统计实验数据 / 用 fofa 扫描 50 个 nginx 资产" onkeydown="if(event.key==='Enter')sendChat()">
+      <button onclick="sendChat()">发送</button>
+    </div>
+    <div class="quick-actions">
+      <button onclick="quickChat('查看所有节点状态')">节点状态</button>
+      <button onclick="quickChat('统计实验数据')">数据统计</button>
+      <button onclick="quickChat('用 fofa 扫描 50 个 nginx 资产')">下发 fofa 扫描</button>
+      <button onclick="quickChat('检测漏洞')">漏洞检测</button>
+      <button onclick="quickChat('技术指纹')">技术指纹</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN = ''; // 若服务端开启 token 鉴权，填在这里
+
+async function api(path, method='GET', body=null) {
+  const headers = {'Content-Type': 'application/json'};
+  if (TOKEN) headers['X-Lab-Token'] = TOKEN;
+  const opts = {method, headers};
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+function fmtBytes(b) {
+  if (!b) return 'N/A';
+  if (b > 1024**3) return (b/1024**3).toFixed(1)+'G';
+  if (b > 1024**2) return (b/1024**2).toFixed(1)+'M';
+  return (b/1024).toFixed(1)+'K';
+}
+function fmtUptime(s) {
+  if (!s) return 'N/A';
+  const h = Math.floor(s/3600); const m = Math.floor((s%3600)/60);
+  return h>0 ? `${h}h${m}m` : `${m}m`;
+}
+function pct(used, total) { return total ? Math.round(used/total*100) : 0; }
+
+async function loadMonitor() {
+  const d = await api('/api/monitor/overview');
+  if (!d.summary) { console.error(d); return; }
+  const s = d.summary;
+  document.getElementById('s-nodes').textContent = s.total_nodes;
+  document.getElementById('s-online').textContent = s.online_nodes;
+  document.getElementById('s-exp').textContent = s.total_experiments;
+  document.getElementById('s-exp-ok').textContent = s.completed_experiments;
+  document.getElementById('s-exp-err').textContent = s.error_experiments;
+  document.getElementById('s-tasks').textContent = s.total_tasks;
+
+  const grid = document.getElementById('nodes-grid');
+  grid.innerHTML = '';
+  if (!d.nodes.length) { grid.innerHTML = '<div style="color:#8a94a8">暂无节点</div>'; }
+  d.nodes.forEach(n => {
+    const m = n.metrics || {};
+    const cpu = m.cpu_percent != null ? m.cpu_percent : 0;
+    const memPct = pct(m.mem_used, m.mem_total);
+    const diskPct = pct(m.disk_total-m.disk_free, m.disk_total);
+    const card = document.createElement('div');
+    card.className = 'node-card';
+    card.innerHTML = `
+      <div class="node-head">
+        <div><div class="node-name">${n.name||n.node_id}</div><div class="node-id">${n.node_id}</div></div>
+        <span class="status-badge ${n.online?'online':'offline'}">${n.online?'在线':'离线'}</span>
+      </div>
+      <div class="metric-row"><span class="k">CPU</span><span class="v">${cpu}%</span></div>
+      <div class="bar"><div class="bar-fill cpu" style="width:${Math.min(cpu,100)}%"></div></div>
+      <div class="metric-row"><span class="k">内存</span><span class="v">${fmtBytes(m.mem_used)} / ${fmtBytes(m.mem_total)}</span></div>
+      <div class="bar"><div class="bar-fill mem" style="width:${Math.min(memPct,100)}%"></div></div>
+      <div class="metric-row"><span class="k">磁盘</span><span class="v">${fmtBytes(m.disk_total-m.disk_free)} / ${fmtBytes(m.disk_total)}</span></div>
+      <div class="bar"><div class="bar-fill disk" style="width:${Math.min(diskPct,100)}%"></div></div>
+      <div class="metric-row"><span class="k">负载</span><span class="v">${m.load1??'N/A'} / ${m.load5??'N/A'} / ${m.load15??'N/A'}</span></div>
+      <div class="metric-row"><span class="k">运行时长</span><span class="v">${fmtUptime(m.uptime)}</span></div>
+      <div class="metric-row"><span class="k">能力</span><span class="v">${(n.capabilities||[]).join(', ')}</span></div>
+    `;
+    grid.appendChild(card);
+  });
+
+  // 实验列表
+  const expList = document.getElementById('exp-list');
+  expList.innerHTML = '';
+  if (!d.recent_experiments.length) { expList.innerHTML = '<div style="color:#8a94a8">暂无实验</div>'; }
+  d.recent_experiments.slice(0, 8).forEach(e => {
+    const item = document.createElement('div');
+    item.className = 'exp-item';
+    item.innerHTML = `
+      <div class="exp-left">
+        <div>${e.project_name||e.project_slug||'未知项目'}</div>
+        <div style="color:#8a94a8;font-size:12px">${e.node_id||''} · ${(e.public_observation||'').slice(0,60)}</div>
+      </div>
+      <span class="exp-status ${e.status}">${e.status}</span>
+    `;
+    expList.appendChild(item);
+  });
+}
+
+async function loadAnalytics() {
+  const d = await api('/api/analytics');
+  // 状态分布
+  const statusEl = document.getElementById('chart-status');
+  const byStatus = d.by_status || {};
+  const colors = {completed:'#4ade80', error:'#f87171', planned:'#fbbf24', running:'#60a5fa'};
+  const total = Object.values(byStatus).reduce((a,b)=>a+b,0);
+  statusEl.innerHTML = Object.entries(byStatus).map(([k,v]) =>
+    `<div class="metric-row"><span class="k">${k}</span><span class="v">${v} (${total?Math.round(v/total*100):0}%)</span></div>`).join('')
+    || '<div style="color:#8a94a8">暂无数据</div>';
+
+  // 节点分布
+  const nodeEl = document.getElementById('chart-node');
+  const byNode = d.by_node || {};
+  const nodeTotal = Object.values(byNode).reduce((a,b)=>a+b,0);
+  nodeEl.innerHTML = Object.entries(byNode).map(([k,v]) => {
+    const p = nodeTotal?Math.round(v/nodeTotal*100):0;
+    return `<div class="metric-row"><span class="k">${k}</span><span class="v">${v} 条</span></div>
+            <div class="bar"><div class="bar-fill cpu" style="width:${p}%"></div></div>`;
+  }).join('') || '<div style="color:#8a94a8">暂无数据</div>';
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  const history = document.getElementById('chat-history');
+  history.innerHTML += `<div class="msg user">${escapeHtml(msg)}</div>`;
+  input.value = '';
+  const r = await api('/api/chat', 'POST', {message: msg});
+  history.innerHTML += `<div class="msg bot">${escapeHtml(r.reply || r.error || '无响应')}</div>`;
+  history.scrollTop = history.scrollHeight;
+}
+function quickChat(m) { document.getElementById('chat-input').value = m; sendChat(); }
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+loadMonitor();
+loadAnalytics();
+setInterval(loadMonitor, 5000);   // 5 秒刷新实时状态
+setInterval(loadAnalytics, 10000); // 10 秒刷新图表
+</script>
+</body>
+</html>
