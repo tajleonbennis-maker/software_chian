@@ -55,6 +55,7 @@ from core.api_scanner import APIScanner
 from core.exposure_discovery import FrontendExposureDiscovery
 from core.ownership_discovery import OwnershipDiscovery
 from core.research_brain import ResearchBrain
+from core.dispatcher import TaskDispatcher
 # 导入 AI 分析器（DeepSeek API，可选模块，未配置 API Key 时自动禁用）
 from core.ai_analyzer import AIAnalyzer
 
@@ -492,6 +493,9 @@ def probe_research_project(project_slug: str, asset_data: Dict[str, Any]) -> Dic
 research_brain = ResearchBrain(scan_database, Config, analyze_research_candidate,
                                probe_research_project)
 research_brain.start()
+
+# 大脑端任务分发器：向执行引擎（worker 节点）下发任务并回收结果
+task_dispatcher = TaskDispatcher(scan_database, Config)
 
 
 def run_analysis(task_id: str, mode: str, fofa_query: str, fofa_key: str,
@@ -1242,6 +1246,38 @@ def api_research_overview():
     })
 
 
+@app.route("/api/lab/overview")
+def api_lab_overview():
+    return jsonify(scan_database.lab_overview())
+
+
+# ============================================================
+# 大脑端：任务分发 API（向执行引擎下发任务 / 查看节点）
+# ============================================================
+@app.route("/api/dispatch", methods=["POST"])
+def api_dispatch():
+    """向执行引擎下发任务。Body: {"type": "scan", "params": {...}, "broadcast": false}"""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    broadcast = bool(payload.get("broadcast", False))
+    task = {"type": payload.get("type", "scan"), "params": payload.get("params", {})}
+    if broadcast:
+        results = task_dispatcher.dispatch_to_all(task)
+        return jsonify({"ok": True, "results": results})
+    result = task_dispatcher.dispatch(task)
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+@app.route("/api/nodes")
+def api_nodes():
+    """查看配置的执行引擎节点列表"""
+    nodes = []
+    for n in task_dispatcher.list_nodes():
+        nodes.append({k: n[k] for k in ("node_id", "name", "url", "capabilities", "enabled")})
+    return jsonify({"nodes": nodes})
+
+
 @app.route("/api/lab/report", methods=["POST"])
 def api_lab_report():
     if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
@@ -1251,11 +1287,6 @@ def api_lab_report():
         return jsonify({"error": "node_id required"}), 400
     scan_database.upsert_lab_report(report)
     return jsonify({"ok": True})
-
-
-@app.route("/api/lab/overview")
-def api_lab_overview():
-    return jsonify(scan_database.lab_overview())
 
 # ============================================================
 # 定期清理过期任务（简单的内存管理）
