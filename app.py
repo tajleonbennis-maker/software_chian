@@ -1225,14 +1225,55 @@ def api_showcase():
 @app.route("/api/research/overview")
 def api_research_overview():
     """Public, sanitized status of autonomous project research."""
+    from core.research_brain import SEED_PROJECTS
+    from core.database import ScanDatabase
+
     overview = scan_database.research_overview()
-    projects = [{
-        key: project.get(key) for key in (
-            "slug", "name", "repository", "upstream", "license", "category",
-            "priority", "rationale", "last_run_at", "next_run_at", "asset_count",
-            "analyzed_count", "pending_count", "rejected_count", "insight", "insight_updated_at",
-        )
-    } for project in overview["projects"]]
+    # 查询各项目已分析资产的漏洞，计算高危 CVE / 公开部署估算
+    db = ScanDatabase(Config.DATABASE_PATH)
+    project_critical = {}
+    project_analyzed_assets = {}
+    try:
+        conn = db._connect()
+        rows = conn.execute(
+            "SELECT project_slug, analysis_json FROM research_assets "
+            "WHERE analysis_json IS NOT NULL AND analysis_json != ''").fetchall()
+        conn.close()
+        for row in rows:
+            slug = row["project_slug"]
+            project_analyzed_assets.setdefault(slug, 0)
+            project_analyzed_assets[slug] += 1
+            try:
+                an = json.loads(row["analysis_json"])
+            except Exception:
+                continue
+            for v in (an.get("vulnerabilities") or []):
+                sev = (v.get("severity") or "").upper()
+                if sev in ("CRITICAL", "HIGH"):
+                    project_critical.setdefault(slug, [])
+                    project_critical[slug].append(v.get("cve_id") or v.get("id") or "")
+        for slug in project_critical:
+            project_critical[slug] = list(dict.fromkeys(
+                c for c in project_critical[slug] if c))[:5]
+    except Exception as exc:
+        logger.warning("统计项目高危漏洞失败: %s", exc)
+
+    seed_map = {p.get("slug"): p for p in SEED_PROJECTS}
+    projects = []
+    for project in overview["projects"]:
+        item = {
+            key: project.get(key) for key in (
+                "slug", "name", "repository", "upstream", "license", "category",
+                "priority", "rationale", "last_run_at", "next_run_at", "asset_count",
+                "analyzed_count", "pending_count", "rejected_count", "insight", "insight_updated_at",
+            )
+        }
+        seed = seed_map.get(project.get("slug"), {})
+        item["discovery_query"] = seed.get("discovery_query", "")
+        item["critical_cves"] = project_critical.get(project.get("slug"), [])
+        # 公开部署估算：analyzed_count 已分析数量 + pending 待处理
+        item["deployment_estimate"] = (project.get("asset_count") or 0)
+        projects.append(item)
     runs = [{
         key: run.get(key) for key in (
             "project_name", "status", "reason", "discovered_count", "new_count",
@@ -1398,11 +1439,12 @@ def api_assets():
     assets = []
     seen = set()
 
-    # 1. 从 research_assets 取
+    # 1. 从 research_assets 取（合并分析结果：风险评分 / 组件指纹 / 漏洞数）
     try:
         conn = db._connect()
         rows = conn.execute(
-            "SELECT asset_json, project_slug, last_seen FROM research_assets ORDER BY last_seen DESC LIMIT ?",
+            "SELECT asset_json, project_slug, analysis_json, analysis_status, analyzed_at "
+            "FROM research_assets ORDER BY last_seen DESC LIMIT ?",
             (limit * 3,)).fetchall()
         conn.close()
         for row in rows:
@@ -1414,6 +1456,27 @@ def api_assets():
             if not key or key in seen:
                 continue
             asset.setdefault("project_slug", row["project_slug"])
+            # 附加分析摘要（风险评分 / 组件 / 漏洞 / 分析时间）
+            asset["analysis_status"] = row["analysis_status"] or ""
+            asset["analyzed_at"] = row["analyzed_at"] or 0
+            if row["analysis_json"]:
+                try:
+                    an = json.loads(row["analysis_json"])
+                    asset["risk_level"] = an.get("risk_level", "")
+                    asset["risk_score"] = an.get("risk_score", 0)
+                    asset["vuln_count"] = an.get("vuln_count", 0)
+                    asset["tech_count"] = an.get("tech_count", 0)
+                    asset["components"] = [
+                        {"name": t.get("name", ""), "version": t.get("version", ""),
+                         "category": t.get("category", "")}
+                        for t in (an.get("technologies") or [])
+                    ][:10]
+                    asset["api_count"] = len(an.get("api_endpoints") or [])
+                    asset["critical_count"] = sum(
+                        1 for v in (an.get("vulnerabilities") or [])
+                        if (v.get("severity") or "").upper() in ("CRITICAL", "HIGH"))
+                except Exception:
+                    pass
             assets.append(asset)
             seen.add(key)
             if len(assets) >= limit:
@@ -1446,6 +1509,214 @@ def api_assets():
                   or query in (a.get("title") or "").lower()]
 
     return jsonify({"total": len(assets), "assets": assets})
+
+
+@app.route("/api/asset/detail")
+def api_asset_detail():
+    """单资产深度详情：组件树 + 供应链 + 漏洞 + API + 敏感信息
+
+    ?host= 资产 host/ip/url（必填）
+    数据来源：research_assets.analysis_json（研究大脑深度分析结果）
+    """
+    host = (request.args.get("host") or "").strip()
+    if not host:
+        return jsonify({"error": "host 必填"}), 400
+
+    from core.database import ScanDatabase
+    db = ScanDatabase(Config.DATABASE_PATH)
+    detail = {
+        "asset": None, "technologies": [], "supply_chains": [], "vulnerabilities": [],
+        "exploits": [], "api_endpoints": [], "api_report": None,
+        "exposure_findings": [], "ownership_profile": {},
+        "vuln_count": 0, "tech_count": 0, "risk_level": "INFO",
+        "analysis_status": "", "analyzed_at": 0, "source": "database",
+    }
+    # 1. 从 research_assets 的 analysis_json 取（前端路由暴露 / 项目确认等）
+    try:
+        conn = db._connect()
+        row = conn.execute(
+            "SELECT asset_json, analysis_json, analysis_status, analyzed_at, project_slug "
+            "FROM research_assets WHERE asset_json LIKE ? ORDER BY analyzed_at DESC LIMIT 1",
+            ("%" + host + "%",)).fetchone()
+        if row:
+            try:
+                an = json.loads(row["analysis_json"]) if row["analysis_json"] else {}
+                if an:
+                    detail["asset"] = json.loads(row["asset_json"])
+                    detail.update({k: an.get(k) for k in (
+                        "technologies", "supply_chains", "vulnerabilities", "exploits",
+                        "api_endpoints", "api_report", "exposure_findings",
+                        "ownership_profile", "vuln_count", "tech_count", "risk_level")})
+                    detail["analysis_status"] = row["analysis_status"] or ""
+                    detail["analyzed_at"] = row["analyzed_at"] or 0
+                    detail["project_slug"] = row["project_slug"]
+                    detail["source"] = "database"
+            except Exception:
+                pass
+        conn.close()
+    except Exception as exc:
+        logger.warning("读取资产详情失败: %s", exc)
+
+    # 2. 从实验 evidence 补充深度分析结果（deep_analysis / api_crawl 的漏洞、组件、API、敏感信息）
+    #    —— 与 database 数据合并：experiments 的结果往往更全
+    lab = scan_database.lab_overview()
+    merged_evidence = None
+    for e in lab.get("experiments", []):
+        for item in e.get("evidence", []):
+            target = item.get("target") or item.get("host") or item.get("url") or ""
+            if host in target or target in host:
+                # 若已有 database 数据且该 evidence 漏洞/组件较少，跳过
+                if merged_evidence is None and (item.get("vulnerabilities") or item.get("technologies")
+                                                or item.get("api_endpoints") or item.get("sensitive_hits")):
+                    merged_evidence = item
+                    break
+        if merged_evidence is not None:
+            break
+    if merged_evidence:
+        if not detail.get("asset"):
+            detail["asset"] = {"host": merged_evidence.get("target") or host,
+                               "ip": merged_evidence.get("ip"), "port": merged_evidence.get("port"),
+                               "title": merged_evidence.get("title"), "protocol": merged_evidence.get("protocol"),
+                               "country": merged_evidence.get("country"), "city": merged_evidence.get("city")}
+            detail["source"] = "experiment"
+        # 合并：漏洞 / 技术 / API / 敏感信息（数据库缺失时补充，存在时去重合并）
+        def _merge_into(key):
+            existing = detail.get(key) or []
+            add = merged_evidence.get(key) or []
+            if not existing:
+                detail[key] = add
+            elif add:
+                seen_keys = set()
+                merged = list(existing)
+                for x in add:
+                    k = x.get("cve_id") or x.get("name") or x.get("url") or x.get("path") or json.dumps(x, sort_keys=True)
+                    if k not in seen_keys:
+                        seen_keys.add(k)
+                        merged.append(x)
+                detail[key] = merged
+        for k in ("vulnerabilities", "technologies", "api_endpoints", "sensitive_hits",
+                  "exposure_findings", "js_secret_scan"):
+            _merge_into(k)
+        detail["vuln_count"] = len(detail.get("vulnerabilities") or [])
+        detail["tech_count"] = len(detail.get("technologies") or [])
+        if not detail.get("project_slug"):
+            detail["project_slug"] = merged_evidence.get("project_slug") or e.get("project_slug")
+
+    if not detail.get("asset"):
+        return jsonify({"error": "资产不存在", "host": host}), 404
+
+    # 3. 关联 credential_leaks（SK 泄露直接显示在资产详情）
+    try:
+        leaks = scan_database.list_credential_leaks(limit=20, target=host)
+        if leaks:
+            for l in leaks:
+                l.pop("api_key_full", None)
+            detail["credential_leaks"] = leaks
+            if not detail.get("sensitive_hits"):
+                detail["sensitive_hits"] = []
+            detail["sensitive_hits"].extend([{
+                "secret_type": l.get("secret_type") or "API Key",
+                "value_masked": l.get("api_key_masked") or "",
+                "source": (l.get("base_url") or "") + " (" + (l.get("provider") or "") + ")",
+            } for l in leaks])
+    except Exception as exc:
+        logger.warning("读取凭据泄露失败: %s", exc)
+
+    # 汇总风险等级：根据漏洞严重程度推导
+    if not detail.get("risk_level") or detail["risk_level"] == "INFO":
+        vulns = detail.get("vulnerabilities") or []
+        if any((v.get("severity") or "").upper() == "CRITICAL" for v in vulns):
+            detail["risk_level"] = "CRITICAL"
+        elif any((v.get("severity") or "").upper() in ("HIGH",) for v in vulns):
+            detail["risk_level"] = "HIGH"
+        elif vulns:
+            detail["risk_level"] = "MEDIUM"
+        elif detail.get("exposure_findings") or detail.get("sensitive_hits") or detail.get("credential_leaks"):
+            detail["risk_level"] = "LOW"
+    return jsonify(detail)
+
+
+@app.route("/api/supply-chain/overview")
+def api_supply_chain_overview():
+    """供应链健康仪表盘：资产组件分布、漏洞组件占比、高风险组件 TopN、API 暴露率"""
+    from core.database import ScanDatabase
+    db = ScanDatabase(Config.DATABASE_PATH)
+
+    total_assets = 0
+    analyzed_assets = 0
+    component_counter = {}
+    vuln_component_counter = {}
+    component_vulns = {}
+    api_asset_count = 0
+    risk_buckets = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    vuln_total = 0
+
+    try:
+        conn = db._connect()
+        rows = conn.execute(
+            "SELECT asset_json, analysis_json, analysis_status FROM research_assets").fetchall()
+        conn.close()
+        for row in rows:
+            total_assets += 1
+            if not row["analysis_json"] or row["analysis_status"] not in ("analyzed", "completed", None):
+                # 仍统计但有分析结果才计入组件
+                if not row["analysis_json"]:
+                    continue
+            try:
+                an = json.loads(row["analysis_json"])
+            except Exception:
+                continue
+            if not an:
+                continue
+            analyzed_assets += 1
+            risk_level = (an.get("risk_level") or "INFO").upper()
+            risk_buckets[risk_level if risk_level in risk_buckets else "INFO"] += 1
+            vulns = an.get("vulnerabilities") or []
+            vuln_total += len(vulns)
+            vuln_assets = {v.get("component") for v in vulns if v.get("component")}
+            if vulns:
+                for v in vulns:
+                    c = v.get("component") or "unknown"
+                    component_vulns.setdefault(c, []).append(v)
+            # 组件统计
+            techs = an.get("technologies") or []
+            for t in techs:
+                c = t.get("name") or "unknown"
+                component_counter[c] = component_counter.get(c, 0) + 1
+                if c in vuln_assets:
+                    vuln_component_counter[c] = vuln_component_counter.get(c, 0) + 1
+            if an.get("api_endpoints"):
+                api_asset_count += 1
+    except Exception as exc:
+        logger.warning("供应链统计失败: %s", exc)
+
+    # 高风险组件 TopN（按漏洞数排序）
+    top_risk_components = sorted(
+        component_vulns.items(), key=lambda kv: len(kv[1]), reverse=True)[:10]
+    top_risk = [{
+        "component": c,
+        "vuln_count": len(vs),
+        "critical": sum(1 for v in vs if (v.get("severity") or "").upper() == "CRITICAL"),
+        "cve_ids": [v.get("cve_id") for v in vs[:3]],
+    } for c, vs in top_risk_components]
+
+    # 常见组件 TopN（部署最广）
+    top_components = sorted(component_counter.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    top_component_list = [{"component": c, "assets": n,
+                           "vuln_assets": vuln_component_counter.get(c, 0)}
+                          for c, n in top_components]
+
+    return jsonify({
+        "total_assets": total_assets,
+        "analyzed_assets": analyzed_assets,
+        "vuln_total": vuln_total,
+        "risk_buckets": risk_buckets,
+        "api_exposure_rate": round(api_asset_count / analyzed_assets, 3) if analyzed_assets else 0,
+        "api_exposed_assets": api_asset_count,
+        "top_risk_components": top_risk,
+        "top_components": top_component_list,
+        "avg_components": round(sum(component_counter.values()) / analyzed_assets, 2) if analyzed_assets else 0,
+    })
 
 
 @app.route("/api/leaks")
