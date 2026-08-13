@@ -4,6 +4,7 @@
 通过环境变量和 .env 文件加载配置，支持 FOFA 凭据、
 扫描参数、服务监听地址等配置项的灵活设置。
 """
+import json
 import os
 from dotenv import load_dotenv
 
@@ -53,6 +54,22 @@ class Config:
         1, min(30, int(os.environ.get("TREND_INTELLIGENCE_PROJECT_LIMIT", "10")))
     )
     LAB_REPORT_TOKEN = os.environ.get("LAB_REPORT_TOKEN", "")
+
+    # ============================================================
+    # 分布式执行引擎配置（大脑 = 本机，执行引擎 = 公网 worker 节点）
+    # ============================================================
+    # 执行引擎节点列表。JSON 数组字符串，每项包含：
+    #   node_id、name、url（worker 的 base url）、token、capabilities、enabled
+    # 示例：
+    #   EXECUTOR_NODES='[{"node_id":"node-a","name":"引擎A","url":"http://165.154.226.119:5566","token":"xxx","capabilities":["fofa","vuln"],"enabled":true}]'
+    _nodes_raw = os.environ.get("EXECUTOR_NODES", "[]")
+    try:
+        EXECUTOR_NODES = json.loads(_nodes_raw)
+    except Exception:
+        EXECUTOR_NODES = []
+
+    # 向执行引擎下发任务的 HTTP 超时（秒）
+    NODE_HTTP_TIMEOUT = int(os.environ.get("NODE_HTTP_TIMEOUT", "30"))
 
     # ============================================================
     # DeepSeek AI API 配置
