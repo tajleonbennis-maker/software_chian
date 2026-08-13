@@ -281,6 +281,7 @@ a:hover { text-decoration: underline; }
 <div class="topbar">
   <div class="brand"><span class="brand-icon">🛡️</span>软件供应链安全分析平台</div>
   <div class="spacer"></div>
+  <span class="badge" style="color:var(--accent-orange);border-color:var(--accent-orange);margin-right:12px" id="mode-badge">实验模式</span>
   <div class="status-badge"><span class="status-dot"></span><span id="topbar-status">连接中...</span></div>
 </div>
 
@@ -311,16 +312,14 @@ a:hover { text-decoration: underline; }
         <input class="query-input" id="overview-search" placeholder="搜索 IP、域名、URL、标题、组件或 CVE" onkeydown="if(event.key==='Enter')searchOverview()">
         <button class="btn" onclick="searchOverview()">搜索</button>
       </div>
-      <div class="chips" style="margin-top:10px">
-        <span class="chip" onclick="setSearch('app=&quot;NGINX&quot;')">Nginx</span>
-        <span class="chip" onclick="setSearch('title=&quot;管理后台&quot;')">管理后台</span>
-        <span class="chip" onclick="setSearch('title=&quot;Open WebUI&quot;')">Open WebUI</span>
-        <span class="chip" onclick="setSearch('title=&quot;Dify&quot;')">Dify</span>
-        <span class="chip" onclick="setSearch('DeepTutor')">DeepTutor</span>
+      <div class="chips" id="hot-chips" style="margin-top:10px">
+        <span class="chip" style="background:var(--bg-tertiary);color:var(--text-secondary);cursor:default">热搜加载中...</span>
       </div>
     </div>
     <div class="section-label">最近资产</div>
     <div id="overview-assets"><div class="empty-hint">加载中...</div></div>
+    <div class="section-label">供应链健康</div>
+    <div class="card" id="supply-overview"><div class="empty-hint">加载中...</div></div>
   </div>
 
   <!-- ===== 扫描任务 ===== -->
@@ -370,9 +369,9 @@ a:hover { text-decoration: underline; }
       <div style="overflow-x:auto">
         <table class="asset-table">
           <thead><tr>
-            <th>Host</th><th>IP</th><th>Port</th><th>协议</th><th>标题</th><th>国家</th><th>城市</th><th>来源</th>
+            <th>Host</th><th>IP</th><th>Port</th><th>协议</th><th>组件</th><th>风险</th><th>漏洞</th><th>标题</th><th>来源</th>
           </tr></thead>
-          <tbody id="asset-table"><tr><td colspan="8" class="empty-hint">加载中...</td></tr></tbody>
+          <tbody id="asset-table"><tr><td colspan="9" class="empty-hint">加载中...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -446,13 +445,21 @@ a:hover { text-decoration: underline; }
 <!-- ========== 抽屉 ========== -->
 <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
 <div class="drawer" id="drawer">
-  <div class="card-header"><h3>资产详情</h3><button class="btn-secondary" onclick="closeDrawer()">✕</button></div>
-  <div id="drawer-host" style="font-family:var(--font-mono);color:var(--accent-blue);font-size:14px;margin-bottom:12px"></div>
+  <div class="card-header">
+    <h3>资产详情</h3>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="badge" id="drawer-risk" style="display:none">INFO</span>
+      <button class="btn-secondary" onclick="closeDrawer()">✕</button>
+    </div>
+  </div>
+  <div id="drawer-host" style="font-family:var(--font-mono);color:var(--accent-blue);font-size:14px;margin-bottom:4px"></div>
+  <div class="hint" id="drawer-meta" style="margin-bottom:12px"></div>
   <div class="drawer-tabs">
     <div class="drawer-tab active" data-tab="vuln" onclick="switchDrawerTab('vuln')">漏洞</div>
-    <div class="drawer-tab" data-tab="tech" onclick="switchDrawerTab('tech')">技术栈</div>
-    <div class="drawer-tab" data-tab="secret" onclick="switchDrawerTab('secret')">敏感信息</div>
+    <div class="drawer-tab" data-tab="tech" onclick="switchDrawerTab('tech')">组件树</div>
+    <div class="drawer-tab" data-tab="supply" onclick="switchDrawerTab('supply')">供应链</div>
     <div class="drawer-tab" data-tab="api" onclick="switchDrawerTab('api')">API</div>
+    <div class="drawer-tab" data-tab="secret" onclick="switchDrawerTab('secret')">敏感信息</div>
   </div>
   <div id="drawer-content"><div class="empty-hint">加载中...</div></div>
 </div>
@@ -494,26 +501,50 @@ function setSearch(q) {
 /* ===== 概览 ===== */
 async function loadOverview() {
   try {
-    const [mon, assets, leaks] = await Promise.all([
-      api('/api/monitor/overview'), api('/api/assets?limit=50'), api('/api/leaks/stats')
+    const [mon, assets, leaks, sc] = await Promise.all([
+      api('/api/monitor/overview'), api('/api/assets?limit=50'), api('/api/leaks/stats'),
+      api('/api/supply-chain/overview')
     ]);
-    document.getElementById('kpi-assets').textContent = (mon.summary?.total_experiments||0) + ' 实验';
-    document.getElementById('kpi-vulns').textContent = '-';
+    document.getElementById('kpi-assets').textContent = (sc.total_assets||0) + ' 资产';
+    document.getElementById('kpi-vulns').textContent = (sc.vuln_total||0) + ' 漏洞';
     document.getElementById('kpi-leaks').textContent = leaks.total || 0;
     document.getElementById('kpi-nodes').textContent = (mon.summary?.online_nodes||0) + '/' + (mon.summary?.total_nodes||0);
     const el = document.getElementById('overview-assets');
     const list = assets.assets || [];
-    el.innerHTML = list.slice(0, 6).map(a => `
+    el.innerHTML = list.slice(0, 6).map(a => {
+      const risk = (a.risk_level || '').toUpperCase();
+      const riskColor = risk.includes('CRIT') ? 'var(--accent-red)' : risk.includes('HIGH') ? 'var(--accent-orange)' : risk.includes('MED') ? '#d29922' : 'var(--text-secondary)';
+      return `
       <div class="node-card" style="margin-bottom:8px;cursor:pointer" onclick="openAssetDetail('${escapeHtml(a.host||a.ip||'')}')">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div>
             <div style="font-family:var(--font-mono);color:var(--accent-blue)">${escapeHtml(a.host||a.ip)}</div>
-            <div class="hint">${escapeHtml(a.server||a.protocol||'')} · ${escapeHtml(a.ip||'')} · ${escapeHtml(a.country||'')}${a.city?' / '+escapeHtml(a.city):''}</div>
+            <div class="hint">${escapeHtml((a.components||[]).map(c=>c.name).join(',')||a.server||a.protocol||'')} · ${escapeHtml(a.ip||'')}${a.country?' · '+escapeHtml(a.country):''}</div>
           </div>
-          <span class="tag blue">${escapeHtml(String(a.port||''))}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="badge" style="color:${riskColor};border-color:${riskColor}">${escapeHtml(risk||'')}</span>
+            <span class="tag blue">${escapeHtml(String(a.port||''))}</span>
+          </div>
         </div>
-      </div>`).join('') || '<div class="empty-hint">暂无资产，先在对话区下发 fofa 扫描任务</div>';
+      </div>`;
+    }).join('') || '<div class="empty-hint">暂无资产，先在对话区下发 fofa 扫描任务</div>';
+    // 供应链健康摘要
+    renderSupplyChain(sc);
   } catch(e) { document.getElementById('overview-assets').innerHTML = '<div class="empty-hint">加载失败</div>'; }
+}
+function renderSupplyChain(sc) {
+  const el = document.getElementById('supply-overview');
+  if (!el) return;
+  const rb = sc.risk_buckets || {};
+  const total = Object.values(rb).reduce((a,b)=>a+b,0);
+  const critical = (rb.CRITICAL||0) + (rb.HIGH||0);
+  el.innerHTML = `
+    <div class="metric-row"><span class="k">平均组件数 / 资产</span><span class="v">${sc.avg_components||0}</span></div>
+    <div class="metric-row"><span class="k">高危+严重资产</span><span class="v" style="color:${critical?'var(--accent-red)':'var(--accent-green)'}">${critical} / ${total}</span></div>
+    <div class="metric-row"><span class="k">API 暴露率</span><span class="v">${sc.api_exposed_assets||0} 资产 · ${Math.round((sc.api_exposure_rate||0)*100)}%</span></div>
+    <div class="metric-row"><span class="k">风险分布</span><span class="v">${Object.entries(rb).filter(([k])=>k!=='INFO').map(([k,v])=>`${k}:${v}`).join(' · ')||'-'}</span></div>
+    ${(sc.top_risk_components||[]).length ? `<div style="margin-top:8px"><div class="hint">高风险组件 Top5：</div>` +
+      sc.top_risk_components.slice(0,5).map(c => `<div class="metric-row"><span class="k">${escapeHtml(c.component)}</span><span class="v vuln-item">${c.vuln_count} 漏洞${c.critical?' · '+c.critical+' CRIT':''}</span></div>`).join('') + '</div>' : ''}`;
 }
 
 /* ===== 扫描 ===== */
@@ -552,19 +583,23 @@ async function loadAssets() {
   document.getElementById('asset-count').textContent = '共 ' + d.total + ' 个';
   const tbody = document.getElementById('asset-table');
   tbody.innerHTML = '';
-  if (!d.assets?.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-hint">暂无资产</td></tr>'; return; }
+  if (!d.assets?.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-hint">暂无资产</td></tr>'; return; }
   d.assets.forEach(a => {
     const tr = document.createElement('tr');
     tr.style.cursor = 'pointer';
-    tr.onclick = () => openAssetDetail(a.host || a.ip || '');
+    tr.onclick = () => openAssetDetail(a.host || a.ip || a.url || '');
+    const risk = (a.risk_level || '').toUpperCase();
+    const riskColor = risk.includes('CRIT') ? 'var(--accent-red)' : risk.includes('HIGH') ? 'var(--accent-orange)' : risk.includes('MED') ? '#d29922' : 'var(--text-secondary)';
+    const components = (a.components || []).map(c => c.name).join(', ').slice(0, 30);
     tr.innerHTML = `
       <td class="mono host">${escapeHtml(a.host||a.url||'-')}</td>
       <td class="mono">${escapeHtml(a.ip||'-')}</td>
       <td class="mono">${escapeHtml(String(a.port||'-'))}</td>
       <td>${escapeHtml(a.protocol||'-')}</td>
-      <td>${escapeHtml((a.title||'').slice(0,40)||'-')}</td>
-      <td>${escapeHtml(a.country||'-')}</td>
-      <td>${escapeHtml(a.city||'-')}</td>
+      <td>${escapeHtml(components||'-')}</td>
+      <td><span class="badge" style="color:${riskColor};border-color:${riskColor}">${escapeHtml(risk||'-')}</span></td>
+      <td class="mono">${a.vuln_count!=null?a.vuln_count:'-'}</td>
+      <td>${escapeHtml((a.title||'').slice(0,30)||'-')}</td>
       <td class="hint">${escapeHtml(a.project_slug||'-')}</td>`;
     tbody.appendChild(tr);
   });
@@ -572,33 +607,86 @@ async function loadAssets() {
 
 /* ===== 抽屉 ===== */
 async function openAssetDetail(host) {
-  document.getElementById('drawer-host').textContent = host;
+  document.getElementById('drawer-host').textContent = host || '';
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawer-overlay').classList.add('open');
-  // 从实验结果里找该资产的分析
-  const d = await api('/api/experiments');
-  let content = '<div class="empty-hint">该资产暂无深度分析数据，可在对话区下发 deep_analysis</div>';
-  for (const e of d.experiments || []) {
-    for (const item of e.evidence || []) {
-      const target = item.target || item.host || '';
-      if (host && target.includes(host)) {
-        const vulns = (item.vulnerabilities || []).map(v => `
-          <div class="vuln-card">
-            <div class="cve-id">${escapeHtml(v.cve_id||v.id||'漏洞')}</div>
-            <div class="severity ${(v.severity||'').includes('高')?'vuln-item':'vuln-high'}">${escapeHtml(v.severity||'')} · ${escapeHtml(v.score||'')}</div>
-          </div>`).join('') || '<div class="hint">无已知漏洞</div>';
-        const secrets = (item.sensitive_hits||[]).map(s => `
-          <div class="leak-item"><div class="leak-key">${escapeHtml(s.secret_type||s.type||'')}: ${escapeHtml(s.value_masked||'')}</div>
-          <div class="leak-meta">${escapeHtml(s.source||s.path||s.endpoint||'')}</div></div>`).join('') || '<div class="hint">无敏感信息</div>';
-        content = `<div data-panel="vuln">${vulns}</div>
-          <div data-panel="tech" style="display:none">${(item.technologies||[]).map(t=>`<div class="metric-row"><span class="k">${escapeHtml(t.name||'')}</span><span class="v">${escapeHtml(t.version||'')}</span></div>`).join('')||'<div class="hint">无技术栈数据</div>'}</div>
-          <div data-panel="secret" style="display:none">${secrets}</div>
-          <div data-panel="api" style="display:none"><div class="hint">${escapeHtml(String((item.api_endpoints||[]).length))} 个 API 端点</div></div>`;
-        break;
-      }
+  document.getElementById('drawer-content').innerHTML = '<div class="empty-hint">加载中...</div>';
+  const riskEl = document.getElementById('drawer-risk');
+  const metaEl = document.getElementById('drawer-meta');
+  riskEl.style.display = 'none';
+  metaEl.textContent = '';
+  try {
+    const d = await api('/api/asset/detail?host=' + encodeURIComponent(host));
+    if (d.error) {
+      document.getElementById('drawer-content').innerHTML = `<div class="empty-hint">${escapeHtml(d.error)}，可下发 deep_analysis 任务分析该资产</div>`;
+      return;
     }
+    // 风险徽标
+    const risk = (d.risk_level || 'INFO').toUpperCase();
+    const riskColor = risk.includes('CRIT') ? 'var(--accent-red)' : risk.includes('HIGH') ? 'var(--accent-orange)' : risk.includes('MED') ? '#d29922' : risk.includes('LOW') ? 'var(--accent-blue)' : 'var(--text-secondary)';
+    riskEl.textContent = risk;
+    riskEl.style.display = 'inline-block';
+    riskEl.style.color = riskColor;
+    riskEl.style.borderColor = riskColor;
+    // 元信息
+    const meta = [];
+    if (d.asset) {
+      if (d.asset.ip) meta.push('IP: ' + d.asset.ip);
+      if (d.asset.port) meta.push('端口: ' + d.asset.port);
+      if (d.asset.protocol) meta.push(d.asset.protocol);
+      if (d.asset.country) meta.push(d.asset.country + (d.asset.city ? '/' + d.asset.city : ''));
+      if (d.asset.title) meta.push(d.asset.title);
+    }
+    if (d.vuln_count) meta.push('漏洞 ' + d.vuln_count);
+    if (d.tech_count) meta.push('组件 ' + d.tech_count);
+    if (d.project_slug) meta.push('项目 ' + d.project_slug);
+    if (d.analyzed_at) meta.push('分析于 ' + new Date(d.analyzed_at*1000).toLocaleString());
+    metaEl.textContent = meta.join(' · ');
+    // 渲染各面板
+    const vulns = (d.vulnerabilities || []).slice(0, 30).map(v => `
+      <div class="vuln-card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="cve-id">${escapeHtml(v.cve_id||v.id||'漏洞')}</div>
+          <span class="badge" style="color:${(v.severity||'').includes('CRIT')?'var(--accent-red)':(v.severity||'').includes('HIGH')?'var(--accent-orange)':'#d29922'};border-color:${(v.severity||'').includes('CRIT')?'var(--accent-red)':(v.severity||'').includes('HIGH')?'var(--accent-orange)':'#d29922'}">${escapeHtml(v.severity||'')}${v.cvss_score?' '+v.cvss_score:''}</span>
+        </div>
+        <div class="leak-meta">${escapeHtml(v.component||'')}${v.affected_versions?' · '+escapeHtml(String(v.affected_versions).slice(0,60)):''}</div>
+        ${v.title&&v.title!==(v.cve_id||'')?`<div class="hint">${escapeHtml(String(v.title).slice(0,100))}</div>`:''}
+      </div>`).join('') || '<div class="hint">无已知漏洞</div>';
+    const techs = (d.technologies || []).map(t => `
+      <div class="metric-row">
+        <span class="k">${escapeHtml(t.name||'')}</span>
+        <span class="v">${escapeHtml(t.version||'')}${t.category?' · '+escapeHtml(t.category):''}</span>
+      </div>`).join('') || '<div class="hint">无组件指纹</div>';
+    const supplies = (d.supply_chains || []).map(s => `
+      <div class="metric-row"><span class="k">${escapeHtml(s.component||s.name||'')}</span><span class="v">${escapeHtml(s.chain||s.dependency_chain||s.path||'')}</span></div>`).join('') || '<div class="hint">无供应链链数据</div>';
+    const apis = (d.api_endpoints || []).map(a => {
+      const url = a.url || a.endpoint || a.path || '';
+      return `<div class="leak-item">
+        <div class="leak-key mono">${escapeHtml(String(a.method||'GET').toUpperCase())} ${escapeHtml(url)}</div>
+        <div class="leak-meta">${a.risk_level?escapeHtml(a.risk_level):''}${a.auth_required!=null?' · 鉴权:'+(a.auth_required?'需要':'未鉴权'):''}${a.sensitive_params?escapeHtml(' · '+a.sensitive_params):''}</div>
+      </div>`;
+    }).join('') || '<div class="hint">无 API 端点数据</div>';
+    const secrets = (d.credential_leaks||[]).map(l => `
+      <div class="leak-item" style="border-color:var(--accent-red)">
+        <div class="leak-key" style="color:var(--accent-red)">🔑 ${escapeHtml(l.provider||'unknown')}: ${escapeHtml(l.api_key_masked||'')}</div>
+        <div class="leak-meta">Base URL: ${escapeHtml(l.base_url||'-')} · ${escapeHtml(l.secret_type||'')} · 来源: ${escapeHtml(l.source_path||'-')}</div>
+      </div>`).join('')
+      + (d.sensitive_hits||[]).concat(d.js_secret_scan||[]).map(s => `
+      <div class="leak-item">
+        <div class="leak-key">${escapeHtml(s.secret_type||s.type||'')}: ${escapeHtml(s.value_masked||s.detail||'')}</div>
+        <div class="leak-meta">${escapeHtml(s.source||s.path||s.endpoint||'')}</div>
+      </div>`).join('') || '<div class="hint">无敏感信息</div>';
+    document.getElementById('drawer-content').innerHTML = `
+      <div data-panel="vuln">${vulns}</div>
+      <div data-panel="tech" style="display:none">${techs}</div>
+      <div data-panel="supply" style="display:none">${supplies}</div>
+      <div data-panel="api" style="display:none">${apis}</div>
+      <div data-panel="secret" style="display:none">${secrets}</div>`;
+    // 默认切回漏洞面板
+    switchDrawerTab('vuln');
+  } catch(e) {
+    document.getElementById('drawer-content').innerHTML = '<div class="empty-hint">加载失败: ' + escapeHtml(String(e)) + '</div>';
   }
-  document.getElementById('drawer-content').innerHTML = content;
 }
 function closeDrawer() {
   document.getElementById('drawer').classList.remove('open');
@@ -647,6 +735,19 @@ async function loadMonitor() {
   document.getElementById('s-exp-ok').textContent = s.completed_experiments || 0;
   document.getElementById('s-exp-err').textContent = s.error_experiments || 0;
   document.getElementById('topbar-status').textContent = (s.online_nodes||0) + '/' + (s.total_nodes||0) + ' 节点在线';
+  // 数据量判定：生产模式 vs 实验模式
+  const modeEl = document.getElementById('mode-badge');
+  if (modeEl) {
+    if ((s.total_experiments||0) >= 20) {
+      modeEl.textContent = '生产模式';
+      modeEl.style.color = 'var(--accent-green)';
+      modeEl.style.borderColor = 'var(--accent-green)';
+    } else {
+      modeEl.textContent = '实验模式';
+      modeEl.style.color = 'var(--accent-orange)';
+      modeEl.style.borderColor = 'var(--accent-orange)';
+    }
+  }
   const grid = document.getElementById('nodes-grid');
   grid.innerHTML = '';
   (d.nodes||[]).forEach(n => {
@@ -704,13 +805,29 @@ async function loadResearch() {
       <div>
         <div><strong>${escapeHtml(p.name||'')}</strong> <span class="hint">${escapeHtml(p.category||'')} · P${p.priority||'-'}</span></div>
         <div class="hint">${p.repository?`<a href="${escapeHtml(p.repository)}" target="_blank">${escapeHtml(p.repository)}</a>`:''}</div>
+        <div class="hint" style="margin-top:4px">
+          ${p.discovery_query?`<span class="chip" onclick="setSearch('${escapeHtml(p.discovery_query)}')" title="点击搜索">🔎 ${escapeHtml(String(p.discovery_query).slice(0,30))}</span>`:''}
+          ${p.critical_cves&&p.critical_cves.length?`<span class="badge" style="color:var(--accent-red);border-color:var(--accent-red)">高危 ${p.critical_cves.length}</span>`:''}
+        </div>
       </div>
       <div style="text-align:right;flex-shrink:0;margin-left:12px">
         <div><span class="asset-num">${p.asset_count||0}</span> <span class="hint">资产</span></div>
         <div class="hint" style="color:var(--accent-green)">已分析 ${p.analyzed_count||0}</div>
+        ${p.deployment_estimate?`<div class="hint">估算 ${p.deployment_estimate}</div>`:''}
       </div>
     </div>`).join('') || '<div class="empty-hint">暂无项目</div>';
   const signals = (d.trends && d.trends.signals) || [];
+  // 热搜组件 → 动态快捷标签
+  const chipsEl = document.getElementById('hot-chips');
+  if (chipsEl) {
+    const hotNames = signals.slice(0, 8).map(s => s.name).filter(Boolean);
+    if (hotNames.length) {
+      chipsEl.innerHTML = hotNames.map(n => `<span class="chip" onclick="setSearch('${escapeHtml(n)}')">${escapeHtml(n)} 🔥</span>`).join('')
+        + `<span class="chip" onclick="setSearch('app=&quot;NGINX&quot;')">Nginx</span>
+           <span class="chip" onclick="setSearch('title=&quot;Dify&quot;')">Dify</span>
+           <span class="chip" onclick="setSearch('title=&quot;管理后台&quot;')">管理后台</span>`;
+    }
+  }
   document.getElementById('fofa-hot').innerHTML = signals.slice(0,12).map((s,i) => `
     <div class="rank-item"><span class="k ${i<3?'rank-top':''}">${i+1}. ${escapeHtml(s.name||'')} ${s.is_hot?'🔥':''}</span><span class="v">${s.hot_score||0}</span></div>`).join('') || '<div class="empty-hint">暂无热搜</div>';
   document.getElementById('trend-signals').innerHTML = signals.slice(0,10).map(s => `
