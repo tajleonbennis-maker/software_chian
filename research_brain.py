@@ -48,6 +48,13 @@ SEED_PROJECTS = [
         "discovery_query": 'title="LobeChat" || title="Lobe Chat"', "category": "AI 应用",
         "priority": 84, "rationale": "流行的 AI 聊天前端，适合研究前端配置、服务代理与快速部署风险。",
     },
+    {
+        "slug": "firecrawl", "name": "Firecrawl",
+        "repository": "https://github.com/firecrawl/firecrawl",
+        "upstream": "Firecrawl", "license": "AGPL-3.0",
+        "discovery_query": 'title="Firecrawl"', "category": "AI 数据抓取",
+        "priority": 82, "rationale": "热门的 AI 网页抓取服务，自托管部署常见，API 密钥与服务端请求伪造风险值得研究。",
+    },
 ]
 
 
