@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+<rect width="1440" height="900" fill="#0d1117"/>
+<rect width="220" height="900" fill="#161b22"/>
+<rect width="1440" height="56" fill="#161b22"/>
+<text x="24" y="34" fill="#e6edf3" font-family="sans-serif" font-size="16" font-weight="600">软件供应链安全分析平台</text>
+<text x="28" y="110" fill="#58a6ff" font-family="sans-serif" font-size="13">概览 / 情报墙</text>
+<text x="28" y="154" fill="#8b949e" font-family="sans-serif" font-size="13">扫描任务</text>
+<text x="28" y="198" fill="#8b949e" font-family="sans-serif" font-size="13">资产库</text>
+<text x="28" y="242" fill="#8b949e" font-family="sans-serif" font-size="13">大脑监控</text>
+<text x="252" y="100" fill="#e6edf3" font-family="sans-serif" font-size="22" font-weight="600">网络资产与供应链情报</text>
+<rect x="252" y="150" width="260" height="90" rx="12" fill="#161b22" stroke="#30363d"/>
+<text x="272" y="180" fill="#8b949e" font-size="12" font-family="sans-serif">资产总数</text>
+<text x="272" y="210" fill="#58a6ff" font-size="28" font-family="sans-serif" font-weight="700">1,248</text>
+<rect x="532" y="150" width="260" height="90" rx="12" fill="#161b22" stroke="#30363d"/>
+<text x="552" y="180" fill="#8b949e" font-size="12" font-family="sans-serif">严重漏洞</text>
+<text x="552" y="210" fill="#f85149" font-size="28" font-family="sans-serif" font-weight="700">37</text>
+<rect x="812" y="150" width="260" height="90" rx="12" fill="#161b22" stroke="#30363d"/>
+<text x="832" y="180" fill="#8b949e" font-size="12" font-family="sans-serif">高危资产</text>
+<text x="832" y="210" fill="#db6d28" font-size="28" font-family="sans-serif" font-weight="700">89</text>
+<rect x="1092" y="150" width="260" height="90" rx="12" fill="#161b22" stroke="#30363d"/>
+<text x="1112" y="180" fill="#8b949e" font-size="12" font-family="sans-serif">研究项目</text>
+<text x="1112" y="210" fill="#3fb950" font-size="28" font-family="sans-serif" font-weight="700">12</text>
+<rect x="252" y="260" width="1120" height="44" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="270" y="288" fill="#8b949e" font-size="13" font-family="sans-serif">搜索 IP、域名、URL、标题、组件或 CVE</text>
+<rect x="252" y="320" width="1120" height="100" rx="12" fill="#161b22" stroke="#30363d"/>
+<circle cx="278" cy="370" r="5" fill="#f85149"/>
+<text x="295" y="360" fill="#e6edf3" font-size="16" font-family="sans-serif">192.168.1.20:8443</text>
+<text x="295" y="385" fill="#8b949e" font-size="12" font-family="sans-serif">Nginx 1.18 / OpenSSL</text>
+<text x="1200" y="360" fill="#f85149" font-size="12" font-family="sans-serif" font-weight="700">CRITICAL</text>
+</svg>

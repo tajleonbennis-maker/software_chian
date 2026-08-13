@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+<rect width="900" height="900" fill="#0d1117"/>
+<rect x="900" width="540" height="900" fill="#161b22"/>
+<text x="920" y="40" fill="#e6edf3" font-size="18" font-family="sans-serif" font-weight="600">资产详情</text>
+<text x="920" y="70" fill="#58a6ff" font-size="14" font-family="monospace">192.168.1.20:8443</text>
+<text x="920" y="110" fill="#8b949e" font-size="12" font-family="sans-serif">技术栈</text>
+<text x="1000" y="110" fill="#8b949e" font-size="12" font-family="sans-serif">供应链</text>
+<text x="1080" y="110" fill="#58a6ff" font-size="12" font-family="sans-serif" font-weight="600">漏洞</text>
+<text x="1160" y="110" fill="#8b949e" font-size="12" font-family="sans-serif">利用</text>
+<text x="1240" y="110" fill="#8b949e" font-size="12" font-family="sans-serif">API</text>
+<line x1="920" y1="120" x2="1420" y2="120" stroke="#30363d"/>
+<rect x="920" y="140" width="500" height="88" rx="8" fill="#12161c" stroke="#30363d"/>
+<text x="940" y="170" fill="#e6edf3" font-size="13" font-family="monospace">CVE-2021-23017</text>
+<text x="940" y="195" fill="#f85149" font-size="12" font-family="sans-serif" font-weight="600">CRITICAL  9.8</text>
+<rect x="920" y="240" width="500" height="88" rx="8" fill="#12161c" stroke="#30363d"/>
+<text x="940" y="270" fill="#e6edf3" font-size="13" font-family="monospace">CVE-2019-20372</text>
+<text x="940" y="295" fill="#db6d28" font-size="12" font-family="sans-serif" font-weight="600">HIGH  7.5</text>
+</svg>
