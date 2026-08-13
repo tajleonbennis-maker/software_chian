@@ -1342,6 +1342,47 @@ def api_monitor_node(node_id):
     return jsonify({"error": "node not found"}), 404
 
 
+@app.route("/api/experiments")
+def api_experiments():
+    """实验结果列表（含完整 evidence），支持 ?node_id= 过滤"""
+    lab = scan_database.lab_overview()
+    experiments = lab.get("experiments", [])
+    node_id = request.args.get("node_id")
+    if node_id:
+        experiments = [e for e in experiments if e.get("node_id") == node_id]
+    # 精简输出：完整返回 evidence
+    out = []
+    for e in experiments:
+        item = {
+            "experiment_id": e.get("experiment_id"),
+            "node_id": e.get("node_id"),
+            "project_slug": e.get("project_slug"),
+            "project_name": e.get("project_name"),
+            "version": e.get("version"),
+            "status": e.get("status"),
+            "hypothesis": e.get("hypothesis"),
+            "public_observation": e.get("public_observation"),
+            "reproduction_summary": e.get("reproduction_summary"),
+            "remediation": e.get("remediation"),
+            "conclusion_boundary": e.get("conclusion_boundary"),
+            "created_at": e.get("created_at"),
+            "updated_at": e.get("updated_at"),
+            "evidence": e.get("evidence", []),
+        }
+        out.append(item)
+    return jsonify({"experiments": out, "total": len(out)})
+
+
+@app.route("/api/experiments/<experiment_id>")
+def api_experiment_detail(experiment_id):
+    """单个实验结果详情"""
+    lab = scan_database.lab_overview()
+    for e in lab.get("experiments", []):
+        if e.get("experiment_id") == experiment_id:
+            return jsonify(e)
+    return jsonify({"error": "experiment not found"}), 404
+
+
 @app.route("/api/analytics")
 def api_analytics():
     """数据可视化聚合：实验/任务/节点统计图表数据"""
