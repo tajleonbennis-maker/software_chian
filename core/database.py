@@ -1,4 +1,5 @@
 """SQLite persistence for scan tasks and reports."""
+import hashlib
 import json
 import os
 import sqlite3
@@ -108,6 +109,24 @@ class ScanDatabase:
                 error TEXT, started_at REAL NOT NULL, finished_at REAL
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_intelligence_seen ON intelligence_signals(last_seen DESC)")
+            db.execute("""CREATE TABLE IF NOT EXISTS credential_leaks (
+                leak_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                node_id TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT '',
+                base_url TEXT NOT NULL DEFAULT '',
+                api_key_masked TEXT NOT NULL DEFAULT '',
+                api_key_full TEXT NOT NULL DEFAULT '',
+                secret_type TEXT NOT NULL DEFAULT '',
+                source_path TEXT NOT NULL DEFAULT '',
+                evidence TEXT,
+                status TEXT NOT NULL DEFAULT 'new',
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_leaks_status ON credential_leaks(status)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_leaks_target ON credential_leaks(target)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_leaks_api_key ON credential_leaks(api_key_full)")
             asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
             for name, definition in (
                 ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -474,6 +493,67 @@ class ScanDatabase:
         for experiment in experiments:
             experiment["evidence"] = json.loads(experiment.pop("evidence_json"))
         return {"nodes": nodes, "experiments": experiments}
+
+    # ============================================================
+    # 凭据泄露表（credential_leaks）
+    # ============================================================
+    def upsert_credential_leak(self, leak: Dict[str, Any]):
+        """写入/更新一条凭据泄露记录（按 target+api_key_full 去重）"""
+        now = time.time()
+        with self._lock, self._connect() as db:
+            existing = db.execute(
+                "SELECT leak_id, last_seen FROM credential_leaks WHERE target=? AND api_key_full=?",
+                (leak.get("target", ""), leak.get("api_key_full", ""))).fetchone()
+            if existing:
+                db.execute("""UPDATE credential_leaks SET last_seen=?, status=?,
+                    provider=?, base_url=?, evidence=?, node_id=?
+                    WHERE leak_id=?""",
+                    (now, leak.get("status", "new"), leak.get("provider", ""),
+                     leak.get("base_url", ""), json.dumps(leak.get("evidence", []), ensure_ascii=False),
+                     leak.get("node_id", ""), existing["leak_id"]))
+                return existing["leak_id"]
+            leak_id = leak.get("leak_id") or (hashlib.md5(
+                (str(leak.get("target", "")) + "|" + str(leak.get("api_key_full", ""))).encode()).hexdigest())
+            db.execute("""INSERT INTO credential_leaks
+                (leak_id, target, node_id, provider, base_url, api_key_masked, api_key_full,
+                 secret_type, source_path, evidence, status, first_seen, last_seen)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (leak_id, leak.get("target", ""), leak.get("node_id", ""),
+                 leak.get("provider", ""), leak.get("base_url", ""),
+                 leak.get("api_key_masked", ""), leak.get("api_key_full", ""),
+                 leak.get("secret_type", ""), leak.get("source_path", ""),
+                 json.dumps(leak.get("evidence", []), ensure_ascii=False),
+                 leak.get("status", "new"), now, now))
+            return leak_id
+
+    def list_credential_leaks(self, limit: int = 100, status: str = "",
+                              target: str = "") -> List[Dict[str, Any]]:
+        """查询凭据泄露记录"""
+        sql = "SELECT * FROM credential_leaks WHERE 1=1"
+        params: list = []
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        if target:
+            sql += " AND target LIKE ?"
+            params.append("%" + target + "%")
+        sql += " ORDER BY last_seen DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def credential_leak_stats(self) -> Dict[str, Any]:
+        """凭据泄露统计"""
+        with self._connect() as db:
+            total = db.execute("SELECT COUNT(*) c FROM credential_leaks").fetchone()["c"]
+            by_provider = dict(db.execute(
+                "SELECT provider, COUNT(*) c FROM credential_leaks GROUP BY provider").fetchall())
+            by_type = dict(db.execute(
+                "SELECT secret_type, COUNT(*) c FROM credential_leaks GROUP BY secret_type").fetchall())
+            by_target = dict(db.execute(
+                "SELECT target, COUNT(*) c FROM credential_leaks GROUP BY target ORDER BY c DESC LIMIT 20").fetchall())
+        return {"total": total, "by_provider": by_provider, "by_type": by_type, "by_target": by_target}
 
     @staticmethod
     def _row_to_dict(row, include_results: bool) -> Dict[str, Any]:
