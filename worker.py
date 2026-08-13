@@ -99,6 +99,8 @@ def execute_task(task: Dict[str, Any]) -> Dict[str, Any]:
             result = _run_api_scan(task_id, params, result)
         elif task_type == "tech_detect":
             result = _run_tech_detect(task_id, params, result)
+        elif task_type == "deep_analysis":
+            result = _run_deep_analysis(task_id, params, result)
         elif task_type == "echo":
             # 连通性测试任务
             result["reproduction_summary"] = f"echo ok: {params.get('message', 'ping')}"
@@ -110,6 +112,249 @@ def execute_task(task: Dict[str, Any]) -> Dict[str, Any]:
         logger.exception("任务 %s 执行失败", task_id)
         result["status"] = "error"
         result["reproduction_summary"] = str(exc)
+    return result
+
+
+SECRET_PATTERNS = [
+    (r"sk-[a-zA-Z0-9]{20,}", "OpenAI/DeepSeek API Key (sk-)"),
+    (r"AKIA[0-9A-Z]{16}", "AWS Access Key"),
+    (r"ghp_[a-zA-Z0-9]{36}", "GitHub Token"),
+    (r"eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}", "JWT Token"),
+    (r"AKLT[a-zA-Z0-9_-]{20,}", "Google API Key"),
+    (r"AIza[0-9A-Za-z_-]{35}", "Google API Key (AIza)"),
+    (r"xox[baprs]-[a-zA-Z0-9-]{20,}", "Slack Token"),
+    (r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY", "私钥 Private Key"),
+    (r"(?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key)\s*[:=]\s*[\"'][a-zA-Z0-9_\-]{16,}[\"']", "硬编码密钥"),
+]
+
+
+KNOWN_APP_PANELS = {
+    "deeptutor": [
+        "/settings/llm", "/settings/models", "/settings/agents",
+        "/api/v1/settings/llm", "/api/v1/settings/llm-options",
+        "/api/v1/settings", "/api/v1/settings/models",
+        "/api/v1/users/me", "/api/v1/config",
+    ],
+    "open-webui": [
+        "/api/v1/auths", "/api/v1/users/", "/api/v1/models",
+        "/api/v1/tools/", "/api/v1/knowledge/",
+    ],
+    "dify": [
+        "/console/api/setup", "/console/api/workspaces/current",
+        "/console/api/workspaces/current/members", "/api/setup",
+    ],
+    "firecrawl": [
+        "/api/v1/team", "/api/v1/user", "/api/v1/keys",
+        "/api/v1/config", "/api/v1/crawl/status/test",
+    ],
+    "anythingllm": [
+        "/api/system", "/api/users", "/api/settings",
+        "/api/workspaces", "/api/embedders",
+    ],
+    "lobechat": [
+        "/api/auth/session", "/api/user/settings",
+        "/api/chat/models", "/api/plugin/list",
+    ],
+    "1panel": [
+        "/api/v1/auth/status", "/api/v1/dashboard/base/os",
+        "/api/v1/settings", "/api/v1/users",
+    ],
+}
+
+
+def _scan_known_app_panels(base_url: str) -> list:
+    """针对已知热门应用枚举常见管理/设置 API 路径，扫描响应中的敏感信息泄露。
+
+    返回值: [{"app": "deeptutor", "path": "...", "status": 200, "secret_type": "OpenAI Key",
+                "value_masked": "sk-xxxxxxxx", "matched": "sk-..."}]
+    """
+    import re
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url)
+    host = f"{parsed.scheme}://{parsed.netloc}"
+    hits = []
+
+    # 识别当前应用（从首页 / 路径特征）
+    try:
+        home = requests.get(base_url, timeout=SCAN_TIMEOUT,
+                            headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+        home_text = home.text.lower()
+        app_name = None
+        for app in KNOWN_APP_PANELS:
+            if app in home_text:
+                app_name = app
+                break
+    except Exception:
+        app_name = None
+
+    # 同时对每个已知应用试探核心端点（提升命中率）
+    target_apps = {app_name} if app_name else set(KNOWN_APP_PANELS.keys())
+    for app in list(target_apps):
+        for path in KNOWN_APP_PANELS.get(app, []):
+            url = host + path
+            try:
+                resp = requests.get(url, timeout=SCAN_TIMEOUT,
+                                    headers={"User-Agent": "Mozilla/5.0",
+                                             "Accept": "application/json"},
+                                    verify=False)
+                if resp.status_code != 200:
+                    continue
+                body = resp.text
+                # token 模式扫描
+                for pattern, name in SECRET_PATTERNS:
+                    for m in re.finditer(pattern, body):
+                        val = m.group(0)
+                        if len(val) > 20:
+                            shown = val[:8] + "..." + val[-4:]
+                        else:
+                            shown = val[:4] + "..." + val[-2:]
+                        hits.append({
+                            "app": app, "path": path, "url": url,
+                            "secret_type": name, "value_masked": shown,
+                            "matched": pattern[:30],
+                        })
+            except Exception:
+                continue
+    return hits
+
+
+def _scan_js_secrets(base_url: str) -> list:
+    """拉取页面引用的 JS 文件并扫描其中的真实密钥值（SK/AK/token 等）。"""
+    import re
+    hits = []
+    try:
+        resp = requests.get(base_url, timeout=SCAN_TIMEOUT,
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                            verify=False)
+        if resp.status_code != 200:
+            return hits
+        html = resp.text
+        # 提取 JS 文件 URL
+        js_urls = set(re.findall(r'(?:src|href)=["\']([^"\']*\.js[^"\']*)["\']', html))
+        js_urls.update(re.findall(r'["\'](/[^"\']*\.js)["\']', html))
+        fetched = set()
+        for js_url in list(js_urls)[:15]:
+            if js_url.startswith("http"):
+                full = js_url
+            elif js_url.startswith("//"):
+                full = "http:" + js_url
+            else:
+                full = base_url.rstrip("/") + "/" + js_url.lstrip("/")
+            if full in fetched:
+                continue
+            fetched.add(full)
+            try:
+                js_resp = requests.get(full, timeout=SCAN_TIMEOUT, verify=False,
+                                       headers={"User-Agent": "Mozilla/5.0"})
+                if js_resp.status_code != 200:
+                    continue
+                js_body = js_resp.text
+                for pattern, name in SECRET_PATTERNS:
+                    for m in re.finditer(pattern, js_body):
+                        val = m.group(0)
+                        # 脱敏显示，只留前后几位
+                        if len(val) > 20:
+                            shown = val[:8] + "..." + val[-4:]
+                        else:
+                            shown = val[:4] + "..." + val[-2:]
+                        hits.append({
+                            "type": "js_secret", "source": full,
+                            "secret_type": name, "value_masked": shown, "matched": pattern[:30],
+                        })
+                        if len(hits) >= 20:
+                            return hits
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return hits
+
+
+def _run_deep_analysis(task_id: str, params: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """综合深度分析：技术指纹 + 漏洞 + API 发现 + 敏感信息（SK/密钥）泄露检测
+
+    对一个资产做完整的 Web 安全评估，产出结构化 evidence。
+    """
+    from core.tech_detector import TechDetector
+    from core.vuln_checker import VulnChecker
+    from core.api_scanner import APIScanner
+    from core.fofa_client import Asset
+    from core.exposure_discovery import FrontendExposureDiscovery
+
+    targets = params.get("targets", [])
+    if not targets:
+        raise ValueError("deep_analysis 需要 targets 参数")
+
+    detector = TechDetector()
+    checker = VulnChecker(enable_nvd=bool(params.get("online", True)), timeout=SCAN_TIMEOUT)
+    scanner = APIScanner(timeout=SCAN_TIMEOUT)
+    exposure = FrontendExposureDiscovery(timeout=SCAN_TIMEOUT)
+
+    evidence = []
+    for target in targets:
+        item = {"target": target}
+        try:
+            # 1. 技术指纹
+            techs = detector.detect_from_http(target, timeout=SCAN_TIMEOUT)
+            item["technologies"] = [t.to_dict() for t in techs]
+
+            # 2. 基于技术的漏洞匹配
+            vulns = checker.check(techs)
+            item["vulnerabilities"] = [v.to_dict() for v in vulns]
+
+            # 3. API 端点发现 + 安全分析（含敏感信息/SK 检测）
+            asset = Asset(host=target, ip=target, port=443, protocol="https", url=target)
+            endpoints = scanner.scan(asset)
+            item["api_endpoints"] = [ep.to_dict() for ep in endpoints]
+            report = scanner.generate_report(asset, endpoints)
+            item["api_report"] = asdict_safe(report)
+
+            # 4. 前端暴露面 / 敏感字段检测
+            try:
+                findings = exposure.discover(target)
+                item["exposure_findings"] = [f.to_dict() for f in findings]
+            except Exception as exc:
+                item["exposure_findings"] = [{"error": str(exc)}]
+
+            # 5. 敏感信息汇总（SK / AK / token 等）
+            sensitive_hits = []
+            for ep in endpoints:
+                for issue in getattr(ep, "issues", []) or []:
+                    txt = str(issue)
+                    if any(k in txt for k in ("凭证", "密钥", "敏感", "Token", "泄露")):
+                        sensitive_hits.append({"endpoint": ep.url, "issue": txt})
+            for finding in item.get("exposure_findings", []):
+                if finding.get("risk_level") in ("high", "medium"):
+                    sensitive_hits.append({"type": "exposure", "detail": finding.get("evidence", "")})
+
+            # 6. JS 文件密钥模式扫描（真实密钥值检测，如 sk-xxx / AKIAxxx）
+            js_hits = _scan_js_secrets(target)
+            if js_hits:
+                sensitive_hits.extend(js_hits)
+
+            # 7. 已知应用面板枚举（DeepTutor / Open WebUI / Dify 等公开管理的 API 端点）
+            panel_hits = _scan_known_app_panels(target)
+            if panel_hits:
+                sensitive_hits.extend(panel_hits)
+            item["sensitive_hits"] = sensitive_hits[:30]
+            item["js_secret_scan"] = js_hits[:10]
+            item["panel_secret_scan"] = panel_hits[:10]
+        except Exception as exc:
+            item["error"] = str(exc)
+        evidence.append(item)
+    total_sensitive = sum(len(i.get("sensitive_hits", [])) for i in evidence)
+    total_vulns = sum(len(i.get("vulnerabilities", [])) for i in evidence)
+    total_apis = sum(len(i.get("api_endpoints", [])) for i in evidence)
+
+    result["status"] = "completed"
+    result["public_observation"] = (
+        f"深度分析完成：{len(targets)} 目标 | 发现 {total_sensitive} 个敏感信息泄露, "
+        f"{total_vulns} 个漏洞, {total_apis} 个 API 端点")
+    result["reproduction_summary"] = json.dumps(
+        [{"target": i["target"], "sensitive": len(i.get("sensitive_hits", [])),
+          "vulns": len(i.get("vulnerabilities", [])), "apis": len(i.get("api_endpoints", []))}
+         for i in evidence], ensure_ascii=False)
+    result["evidence"] = evidence
     return result
 
 
