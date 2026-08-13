@@ -119,6 +119,44 @@ a { color: #60a5fa; text-decoration: none; }
     </div>
   </div>
 
+  <div class="section-title"><span class="dot"></span> 资产库（FoFa 风格）</div>
+  <div class="chart-card" style="grid-column:1/-1;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+      <h3 style="margin:0">资产列表 <span style="color:#8a94a8;font-size:12px;font-weight:400">(host / ip / 端口 / 协议 / 标题 / 国家 / 城市 / 更新时间)</span></h3>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input id="asset-search" placeholder="搜索 host / ip / 标题" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;width:220px;" onkeydown="if(event.key==='Enter')loadAssets()">
+        <button onclick="loadAssets()" style="background:#3b82f6;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;">搜索</button>
+        <span class="tip" id="asset-count"></span>
+      </div>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead>
+          <tr style="color:#8a94a8;text-align:left;border-bottom:1px solid #2a3550;">
+            <th style="padding:8px">Host</th><th style="padding:8px">IP</th><th style="padding:8px">Port</th>
+            <th style="padding:8px">协议</th><th style="padding:8px">标题</th><th style="padding:8px">国家</th>
+            <th style="padding:8px">城市</th><th style="padding:8px">更新时间</th><th style="padding:8px">来源项目</th>
+          </tr>
+        </thead>
+        <tbody id="asset-table"><tr><td colspan="9" style="padding:16px;color:#8a94a8;text-align:center">加载中...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section-title"><span class="dot"></span> 研究大脑情报</div>
+  <div class="charts">
+    <div class="chart-card" style="grid-column: 1/-1;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0">热门 GitHub 项目部署</h3>
+        <span class="tip" id="research-status"></span>
+      </div>
+      <div id="project-deploy"><div style="color:#8a94a8">加载中...</div></div>
+    </div>
+    <div class="chart-card"><h3>FoFa 热搜组件</h3><div id="fofa-hot"><div style="color:#8a94a8">加载中...</div></div></div>
+    <div class="chart-card"><h3>趋势信号</h3><div id="trend-signals"><div style="color:#8a94a8">加载中...</div></div></div>
+    <div class="chart-card"><h3>研究运行记录</h3><div id="research-runs"><div style="color:#8a94a8">加载中...</div></div></div>
+  </div>
+
   <div class="section-title"><span class="dot"></span> 与大脑对话</div>
   <div class="chat-box">
     <div class="chat-history" id="chat-history">
@@ -324,6 +362,99 @@ async function loadAnalytics() {
   }).join('') || '<div style="color:#8a94a8">暂无数据</div>';
 }
 
+async function loadAssets() {
+  const q = document.getElementById('asset-search').value.trim();
+  const url = q ? '/api/assets?query=' + encodeURIComponent(q) : '/api/assets';
+  const d = await api(url);
+  const tbody = document.getElementById('asset-table');
+  const countEl = document.getElementById('asset-count');
+  countEl.textContent = '共 ' + d.total + ' 个资产';
+  tbody.innerHTML = '';
+  if (!d.assets || !d.assets.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="padding:16px;color:#8a94a8;text-align:center">暂无资产，先在对话区下发 fofa 扫描任务</td></tr>';
+    return;
+  }
+  d.assets.forEach(a => {
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid #232d45';
+    const host = a.host || a.url || '-';
+    const title = (a.title || '').slice(0, 40) || '-';
+    const server = a.server || '';
+    tr.innerHTML = `
+      <td style="padding:8px;color:#60a5fa;font-family:monospace">${escapeHtml(host)}</td>
+      <td style="padding:8px;font-family:monospace">${escapeHtml(a.ip || '-')}</td>
+      <td style="padding:8px;font-family:monospace">${escapeHtml(String(a.port || '-'))}</td>
+      <td style="padding:8px">${escapeHtml(a.protocol || '-')}</td>
+      <td style="padding:8px">${escapeHtml(title)}${server?`<div style="color:#8a94a8;font-size:11px">${escapeHtml(server.slice(0,30))}</div>`:''}</td>
+      <td style="padding:8px">${escapeHtml(a.country || '-')}</td>
+      <td style="padding:8px">${escapeHtml(a.city || '-')}</td>
+      <td style="padding:8px;color:#8a94a8;font-size:11px">${a.lastupdatetime || a.last_seen ? escapeHtml((a.lastupdatetime || '').slice(0,19)) : '-'}</td>
+      <td style="padding:8px;color:#8a94a8;font-size:11px">${escapeHtml(a.project_slug || '-')}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadResearch() {
+  const d = await api('/api/research/overview');
+  document.getElementById('research-status').textContent =
+    (d.enabled ? '研究大脑运行中' : '已禁用') + ' · 模型 ' + d.model + ' · 周期 ' + Math.round(d.interval_seconds/60) + ' 分钟';
+
+  // 热门项目部署
+  const projEl = document.getElementById('project-deploy');
+  const projects = d.projects || [];
+  if (!projects.length) { projEl.innerHTML = '<div style="color:#8a94a8">暂无研究项目</div>'; }
+  else {
+    projEl.innerHTML = projects.map(p => `
+      <div style="background:#0f1420;border:1px solid #232d45;border-radius:8px;padding:10px 12px;margin:6px 0;display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div><strong>${escapeHtml(p.name||'')}</strong> <span style="color:#8a94a8;font-size:11px">${escapeHtml(p.category||'')} · 优先级 ${p.priority||'-'}</span></div>
+          <div style="color:#8a94a8;font-size:11px">${p.repository?`<a href="${escapeHtml(p.repository)}" target="_blank" style="color:#60a5fa">${escapeHtml(p.repository)}</a>`:''}</div>
+          <div style="color:#8a94a8;font-size:11px;margin-top:2px">${escapeHtml((p.rationale||'').slice(0,90))}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;margin-left:12px">
+          <div><span style="color:#60a5fa;font-weight:600;font-size:18px">${p.asset_count||0}</span> <span style="color:#8a94a8;font-size:11px">资产</span></div>
+          <div style="color:#4ade80;font-size:11px">已分析 ${p.analyzed_count||0}</div>
+          <div style="color:#8a94a8;font-size:11px">待处理 ${p.pending_count||0}</div>
+        </div>
+      </div>`).join('');
+  }
+
+  // FoFa 热搜组件
+  const hotEl = document.getElementById('fofa-hot');
+  const signals = (d.trends && d.trends.signals) || [];
+  if (!signals.length) { hotEl.innerHTML = '<div style="color:#8a94a8">暂无热搜数据</div>'; }
+  else {
+    hotEl.innerHTML = signals.slice(0, 12).map((s,i) => `
+      <div class="metric-row">
+        <span class="k"><span style="color:${i<3?'#fbbf24':'#8a94a8'};font-weight:${i<3?'700':'400'}">${i+1}.</span> ${escapeHtml(s.name||'')} ${s.is_hot?'<span style="color:#f87171">🔥</span>':''}</span>
+        <span class="v">${s.hot_score||0} 热度</span>
+      </div>`).join('');
+  }
+
+  // 趋势信号
+  const sigEl = document.getElementById('trend-signals');
+  sigEl.innerHTML = signals.slice(0, 10).map(s => {
+    const statusColor = s.status === 'promoted' ? '#4ade80' : s.status === 'observe' ? '#fbbf24' : '#8a94a8';
+    return `<div class="metric-row">
+      <span class="k">${escapeHtml(s.name||'')}</span>
+      <span class="v" style="color:${statusColor}">${s.status||''} · ${s.momentum||0} 动量</span>
+    </div>`;
+  }).join('') || '<div style="color:#8a94a8">暂无信号</div>';
+
+  // 研究运行记录
+  const runsEl = document.getElementById('research-runs');
+  const runs = d.runs || [];
+  runsEl.innerHTML = runs.slice(0, 8).map(r => `
+    <div class="metric-row">
+      <span class="k">${escapeHtml(r.project_name||'')}</span>
+      <span class="v" style="color:${r.status==='completed'?'#4ade80':r.status==='error'?'#f87171':'#fbbf24'}">${r.status||''} · ${r.discovered_count||0}发现</span>
+    </div>`).join('') || '<div style="color:#8a94a8">暂无运行记录</div>';
+}
+
+
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
@@ -343,9 +474,13 @@ function escapeHtml(s) {
 loadMonitor();
 loadAnalytics();
 loadExperiments();
+loadAssets();
+loadResearch();
 setInterval(loadMonitor, 5000);   // 5 秒刷新实时状态
 setInterval(loadAnalytics, 10000); // 10 秒刷新图表
 setInterval(loadExperiments, 15000); // 15 秒刷新实验结果
+setInterval(loadAssets, 20000);   // 20 秒刷新资产
+setInterval(loadResearch, 30000); // 30 秒刷新研究面板
 </script>
 </body>
 </html>
