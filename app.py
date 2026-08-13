@@ -36,7 +36,7 @@ if BASE_DIR not in sys.path:
 
 from functools import wraps
 
-from flask import Flask, render_template, request, jsonify, abort
+from flask import Flask, render_template, request, jsonify, abort, send_from_directory
 
 # 导入配置
 from config import Config
@@ -783,6 +783,12 @@ def index():
     )
 
 
+@app.route("/dashboard")
+def dashboard():
+    """大脑监控中心 - 实时节点状态 / 数据可视化 / 对话接口"""
+    return send_from_directory(BASE_DIR, "dashboard.html")
+
+
 @app.route("/api/analyze", methods=["POST"])
 @require_admin
 def api_analyze():
@@ -1276,6 +1282,202 @@ def api_nodes():
     for n in task_dispatcher.list_nodes():
         nodes.append({k: n[k] for k in ("node_id", "name", "url", "capabilities", "enabled")})
     return jsonify({"nodes": nodes})
+
+
+# ============================================================
+# 大脑端：实时监控 / 数据可视化 / 对话接口
+# ============================================================
+@app.route("/api/monitor/overview")
+def api_monitor_overview():
+    """实时监控总览：各节点在线状态 + 最近任务 + 实验统计"""
+    lab = scan_database.lab_overview()
+    nodes = lab.get("nodes", [])
+    experiments = lab.get("experiments", [])
+    tasks = scan_database.list_tasks(limit=20)
+
+    summary = {
+        "total_nodes": len(nodes),
+        "online_nodes": sum(1 for n in nodes if n.get("online")),
+        "total_experiments": len(experiments),
+        "completed_experiments": sum(1 for e in experiments if e.get("status") == "completed"),
+        "error_experiments": sum(1 for e in experiments if e.get("status") == "error"),
+        "total_tasks": len(tasks),
+    }
+
+    # 节点实时状态（含资源指标）
+    node_status = []
+    for n in nodes:
+        metrics = n.get("metrics", {})
+        node_status.append({
+            "node_id": n.get("node_id"),
+            "name": n.get("name"),
+            "online": n.get("online"),
+            "status": n.get("status"),
+            "last_heartbeat": n.get("last_heartbeat"),
+            "capabilities": n.get("capabilities", []),
+            "metrics": {
+                "cpu_percent": metrics.get("cpu_percent"),
+                "mem_total": metrics.get("mem_total"),
+                "mem_used": metrics.get("mem_used"),
+                "mem_available": metrics.get("mem_available"),
+                "load1": metrics.get("load1"),
+                "disk_total": metrics.get("disk_total"),
+                "disk_free": metrics.get("disk_free"),
+                "uptime": metrics.get("uptime"),
+                "pid": metrics.get("pid"),
+            },
+        })
+
+    return jsonify({"summary": summary, "nodes": node_status, "recent_tasks": tasks,
+                    "recent_experiments": experiments[:20]})
+
+
+@app.route("/api/monitor/node/<node_id>")
+def api_monitor_node(node_id):
+    """单个节点详情（从数据库 lab_nodes 查）"""
+    lab = scan_database.lab_overview()
+    for n in lab.get("nodes", []):
+        if n.get("node_id") == node_id:
+            return jsonify(n)
+    return jsonify({"error": "node not found"}), 404
+
+
+@app.route("/api/analytics")
+def api_analytics():
+    """数据可视化聚合：实验/任务/节点统计图表数据"""
+    lab = scan_database.lab_overview()
+    nodes = lab.get("nodes", [])
+    experiments = lab.get("experiments", [])
+
+    # 按节点统计实验数
+    by_node = {}
+    for e in experiments:
+        nid = e.get("node_id", "unknown")
+        by_node.setdefault(nid, 0)
+        by_node[nid] += 1
+
+    # 按状态统计
+    by_status = {}
+    for e in experiments:
+        st = e.get("status", "unknown")
+        by_status.setdefault(st, 0)
+        by_status[st] += 1
+
+    # 按项目统计
+    by_project = {}
+    for e in experiments:
+        slug = e.get("project_slug", "unknown")
+        by_project.setdefault(slug, 0)
+        by_project[slug] += 1
+
+    # 时间序列（按创建时间粗略分桶，最近24h按小时）
+    import collections
+    hourly = collections.Counter()
+    for e in experiments:
+        ts = e.get("created_at") or 0
+        from datetime import datetime, timezone
+        hour = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%m-%d %H:00")
+        hourly[hour] += 1
+    time_series = [{"hour": k, "count": v} for k, v in sorted(hourly.items())]
+
+    return jsonify({
+        "nodes": len(nodes),
+        "experiments_total": len(experiments),
+        "by_node": by_node,
+        "by_status": by_status,
+        "by_project": by_project,
+        "time_series": time_series,
+    })
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    """与大脑对话接口：自然语言指令 → 解析为任务 → 下发执行引擎 → 返回结果摘要
+
+    Body: {"message": "扫描一下 nginx 资产", "fofa_key": "可选"}
+    或    {"message": "查看所有节点状态"}
+    或    {"message": "统计实验数据"}
+    """
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    message = (payload.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "message 不能为空"}), 400
+
+    msg_lower = message.lower()
+
+    # ---- 意图 1: 查看节点状态 ----
+    if any(k in msg_lower for k in ("节点", "状态", "在线", "node", "overview", "机器")):
+        lab = scan_database.lab_overview()
+        nodes = lab.get("nodes", [])
+        lines = [f"共 {len(nodes)} 个执行引擎节点："]
+        for n in nodes:
+            metrics = n.get("metrics", {})
+            cpu = metrics.get("cpu_percent")
+            mem = metrics.get("mem_used")
+            mem_total = metrics.get("mem_total")
+            mem_str = f"{mem/1024/1024/1024:.1f}G/{mem_total/1024/1024/1024:.1f}G" if mem and mem_total else "N/A"
+            lines.append(
+                f"  • {n.get('name')} ({n.get('node_id')}) - "
+                f"{'在线' if n.get('online') else '离线'} | "
+                f"CPU {cpu if cpu is not None else 'N/A'}% | 内存 {mem_str}")
+        return jsonify({"ok": True, "intent": "node_status", "reply": "\n".join(lines), "data": nodes})
+
+    # ---- 意图 2: 统计/可视化 ----
+    if any(k in msg_lower for k in ("统计", "可视化", "图表", "多少", "数据", "实验", "analytics")):
+        lab = scan_database.lab_overview()
+        experiments = lab.get("experiments", [])
+        by_status = {}
+        for e in experiments:
+            st = e.get("status", "unknown")
+            by_status[st] = by_status.get(st, 0) + 1
+        reply = (f"当前共有 {len(experiments)} 条实验结果。\n"
+                 f"状态分布：{', '.join(f'{k}={v}' for k, v in by_status.items())}")
+        return jsonify({"ok": True, "intent": "analytics", "reply": reply,
+                        "data": {"experiments": len(experiments), "by_status": by_status}})
+
+    # ---- 意图 3: 下发扫描任务 ----
+    # 识别任务类型
+    task_type = None
+    params = {}
+    if any(k in msg_lower for k in ("fofa", "资产", "发现", "搜索")):
+        task_type = "fofa_discovery"
+        params["size"] = 100
+        import re
+        m = re.search(r"(\d+)", message)
+        if m:
+            params["size"] = int(m.group(1))
+        # 提取查询：去掉命令前缀
+        for kw in ("扫描", "搜索", "查找", "fofa", "资产", "发现", "一下", "的", "用", "查询"):
+            message = message.replace(kw, " ")
+        params["query"] = message.strip() or 'app="NGINX"'
+    elif any(k in msg_lower for k in ("漏洞", "vuln", "检测")):
+        task_type = "vuln_check"
+        params["targets"] = ["https://github.com", "https://www.baidu.com"]
+    elif any(k in msg_lower for k in ("api", "接口")):
+        task_type = "api_scan"
+        params["targets"] = ["https://github.com"]
+    elif any(k in msg_lower for k in ("技术", "tech", "指纹")):
+        task_type = "tech_detect"
+        params["targets"] = ["https://github.com", "https://www.baidu.com"]
+
+    if task_type:
+        task = {"type": task_type, "params": params}
+        result = task_dispatcher.dispatch(task)
+        if result.get("ok"):
+            return jsonify({"ok": True, "intent": "dispatch",
+                            "reply": f"已向 {result.get('node_id')} 下发 {task_type} 任务（task_id: {result.get('task_id')[:12]}...）",
+                            "data": result})
+        return jsonify({"ok": False, "intent": "dispatch", "reply": f"任务下发失败：{result.get('error')}",
+                        "data": result}), 502
+
+    # ---- 意图 4: 帮助 ----
+    reply = ("我支持以下指令：\n"
+             "  1. 查看节点状态（如：所有节点状态）\n"
+             "  2. 数据统计（如：统计实验数据）\n"
+             "  3. 下发扫描任务（如：用 fofa 扫描 50 个 nginx 资产 / 检测漏洞 / 扫描 API / 技术指纹）")
+    return jsonify({"ok": True, "intent": "help", "reply": reply})
 
 
 @app.route("/api/lab/report", methods=["POST"])
