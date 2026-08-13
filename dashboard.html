@@ -3,181 +3,463 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>大脑监控中心 - Supply Chain Distributed</title>
+<title>软件供应链安全分析平台</title>
 <style>
+/* ========== 设计令牌（GitHub 深色） ========== */
+:root {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --bg-inset: #12161c;
+  --border: #30363d;
+  --border-muted: #21262d;
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-tertiary: #6e7681;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-red: #f85149;
+  --accent-orange: #db6d28;
+  --accent-purple: #bc8cff;
+  --sidebar-width: 220px;
+  --topbar-height: 56px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f1420; color: #e8eaf0; min-height: 100vh; }
-.header { background: linear-gradient(135deg, #1a2333 0%, #0f1420 100%); padding: 20px 32px; border-bottom: 1px solid #2a3550; display: flex; justify-content: space-between; align-items: center; }
-.header h1 { font-size: 20px; font-weight: 600; }
-.header .sub { color: #8a94a8; font-size: 13px; margin-top: 4px; }
-.container { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+a { color: var(--accent-blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
-.summary-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
-.sum-card { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 18px; }
-.sum-card .num { font-size: 28px; font-weight: 700; margin-top: 6px; }
-.sum-card .label { color: #8a94a8; font-size: 13px; }
-.sum-card .num.green { color: #4ade80; }
-.sum-card .num.orange { color: #fbbf24; }
-.sum-card .num.red { color: #f87171; }
-.sum-card .num.blue { color: #60a5fa; }
+/* ========== 顶部栏 ========== */
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: var(--topbar-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-muted);
+  display: flex; align-items: center; padding: 0 20px;
+  z-index: 100;
+}
+.topbar .brand { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+.topbar .brand-icon { color: var(--accent-blue); margin-right: 8px; }
+.topbar .spacer { flex: 1; }
+.topbar .status-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 12px; border-radius: 20px; font-size: 12px;
+  background: var(--bg-tertiary); color: var(--text-secondary);
+  border: 1px solid var(--border-muted);
+}
+.topbar .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); }
 
-.section-title { font-size: 16px; font-weight: 600; margin: 24px 0 12px; display: flex; align-items: center; gap: 8px; }
-.section-title .dot { width: 8px; height: 8px; border-radius: 50%; background: #60a5fa; }
+/* ========== 侧边栏 ========== */
+.sidebar {
+  position: fixed; top: var(--topbar-height); bottom: 0; left: 0;
+  width: var(--sidebar-width);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-muted);
+  padding-top: 12px;
+  z-index: 90;
+}
+.sidebar-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  user-select: none;
+}
+.sidebar-item:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+.sidebar-item.active {
+  color: var(--accent-blue);
+  border-left-color: var(--accent-blue);
+  background: rgba(88, 166, 255, 0.08);
+  font-weight: 600;
+}
+.sidebar-item .icon { width: 18px; text-align: center; font-size: 14px; }
 
+/* ========== 主内容区 ========== */
+.main {
+  margin-left: var(--sidebar-width);
+  padding-top: var(--topbar-height);
+  min-height: 100vh;
+}
+.view { display: none; padding: 24px 28px; max-width: 1400px; }
+.view.active { display: block; }
+.page-title { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+.page-desc { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+
+/* ========== KPI 卡片 ========== */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.kpi-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+.kpi-card .label { color: var(--text-secondary); font-size: 12px; }
+.kpi-card .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
+.kpi-card .value.blue { color: var(--accent-blue); }
+.kpi-card .value.green { color: var(--accent-green); }
+.kpi-card .value.red { color: var(--accent-red); }
+.kpi-card .value.orange { color: var(--accent-orange); }
+.kpi-card .value.purple { color: var(--accent-purple); }
+
+/* ========== 通用卡片 ========== */
+.card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.card h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-primary); }
+.card-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
+}
+.section-label { font-size: 14px; font-weight: 600; margin: 24px 0 12px; color: var(--text-primary); }
+
+/* ========== 节点卡片 ========== */
 .nodes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
-.node-card { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; }
-.node-card .node-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.node-card .node-name { font-weight: 600; font-size: 15px; }
-.node-card .node-id { color: #8a94a8; font-size: 12px; font-family: monospace; }
-.status-badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
-.status-badge.online { background: rgba(74, 222, 128, .15); color: #4ade80; border: 1px solid rgba(74,222,128,.3); }
-.status-badge.offline { background: rgba(248, 113, 113, .15); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
+.node-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.node-card.offline { opacity: 0.55; }
+.node-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.node-name { font-weight: 600; font-size: 14px; }
+.node-id { color: var(--text-secondary); font-size: 12px; font-family: var(--font-mono); }
+.badge {
+  padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 500;
+}
+.badge.online { background: rgba(63, 185, 80, .15); color: var(--accent-green); border: 1px solid rgba(63,185,80,.3); }
+.badge.offline { background: rgba(248, 81, 73, .15); color: var(--accent-red); border: 1px solid rgba(248,81,73,.3); }
+.metric-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+.metric-row .k { color: var(--text-secondary); }
+.metric-row .v { font-family: var(--font-mono); }
+.bar { height: 6px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden; margin: 4px 0 8px; }
+.bar-fill { height: 100%; border-radius: 3px; }
+.bar-fill.cpu { background: var(--accent-blue); }
+.bar-fill.mem { background: var(--accent-orange); }
+.bar-fill.disk { background: var(--accent-green); }
 
-.metric-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; border-bottom: 1px solid #232d45; }
-.metric-row:last-child { border-bottom: none; }
-.metric-row .k { color: #8a94a8; }
-.metric-row .v { font-family: monospace; }
+/* ========== 图表区 ========== */
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.chart-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.chart-card h3 { font-size: 14px; margin-bottom: 12px; }
 
-.bar { height: 6px; background: #232d45; border-radius: 3px; overflow: hidden; margin-top: 4px; }
-.bar-fill { height: 100%; border-radius: 3px; transition: width .5s; }
-.bar-fill.cpu { background: linear-gradient(90deg, #60a5fa, #3b82f6); }
-.bar-fill.mem { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
-.bar-fill.disk { background: linear-gradient(90deg, #4ade80, #22c55e); }
+/* ========== 资产表 ========== */
+.asset-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.asset-table th { color: var(--text-secondary); text-align: left; padding: 8px; border-bottom: 1px solid var(--border); font-weight: 500; white-space: nowrap; }
+.asset-table td { padding: 8px; border-bottom: 1px solid var(--border-muted); }
+.asset-table tr:hover td { background: var(--bg-inset); }
+.asset-table .mono { font-family: var(--font-mono); }
+.asset-table .host { color: var(--accent-blue); }
 
-.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 16px; }
-.chart-card { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; }
-.chart-card h3 { font-size: 14px; margin-bottom: 12px; color: #c3cad9; }
+/* ========== 实验列表 ========== */
+.exp-item { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 8px; font-size: 13px; }
+.exp-status { font-weight: 600; }
+.exp-status.completed { color: var(--accent-green); }
+.exp-status.error { color: var(--accent-red); }
+.exp-status.planned { color: var(--accent-orange); }
+.exp-detail { display: none; margin-top: 10px; }
+.exp-detail .metric-row { padding: 6px 0; border-bottom: 1px solid var(--border-muted); }
+.exp-detail .metric-row:last-child { border-bottom: none; }
+.evidence-box { background: var(--bg-inset); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); padding: 8px 12px; margin: 6px 0; }
+.evidence-box .ev-target { font-family: var(--font-mono); color: var(--accent-blue); font-size: 12px; margin-bottom: 4px; }
+.vuln-item { color: var(--accent-red); }
+.vuln-high { color: var(--accent-orange); }
+.secret-item { color: var(--accent-red); font-family: var(--font-mono); }
 
-.chat-box { background: #1a2333; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; margin-top: 16px; }
-.chat-box .chat-history { max-height: 240px; overflow-y: auto; margin-bottom: 12px; }
-.chat-box .msg { margin-bottom: 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px; white-space: pre-wrap; }
-.chat-box .msg.user { background: #22304e; text-align: right; }
-.chat-box .msg.bot { background: #1d2740; }
-.chat-box .chat-input { display: flex; gap: 8px; }
-.chat-box input { flex: 1; background: #0f1420; border: 1px solid #2a3550; color: #e8eaf0; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
-.chat-box button { background: #3b82f6; color: #fff; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; }
-.chat-box button:hover { background: #2563eb; }
+/* ========== 研究大脑 ========== */
+.project-row { background: var(--bg-inset); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); padding: 10px 12px; margin: 6px 0; display: flex; justify-content: space-between; align-items: center; }
+.project-row .asset-num { color: var(--accent-blue); font-weight: 600; font-size: 18px; }
+.rank-item { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12px; }
+.rank-top { color: var(--accent-orange); font-weight: 700; }
 
-.quick-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-.quick-actions button { background: #232d45; color: #c3cad9; border: 1px solid #2a3550; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-.quick-actions button:hover { background: #2a3550; color: #fff; }
+/* ========== 凭据泄露 ========== */
+.leak-item { background: var(--bg-inset); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); padding: 10px 12px; margin: 6px 0; }
+.leak-item .leak-key { font-family: var(--font-mono); color: var(--accent-red); font-size: 12px; word-break: break-all; }
+.leak-item .leak-meta { color: var(--text-secondary); font-size: 11px; margin-top: 4px; }
+.tag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; background: var(--bg-tertiary); color: var(--text-secondary); margin-right: 6px; }
+.tag.blue { color: var(--accent-blue); }
+.tag.green { color: var(--accent-green); }
 
-.experiment-list { margin-top: 16px; }
-.exp-item { background: #1a2333; border: 1px solid #2a3550; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 13px; display: flex; justify-content: space-between; }
-.exp-item .exp-left { flex: 1; margin-right: 12px; }
-.exp-item .exp-status { font-weight: 600; }
-.exp-status.completed { color: #4ade80; }
-.exp-status.error { color: #f87171; }
-.exp-status.planned { color: #fbbf24; }
+/* ========== 对话 ========== */
+.chat-box { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.chat-history { max-height: 280px; overflow-y: auto; margin-bottom: 12px; }
+.msg { margin-bottom: 8px; padding: 8px 12px; border-radius: var(--radius-sm); font-size: 13px; white-space: pre-wrap; line-height: 1.6; }
+.msg.user { background: var(--bg-tertiary); text-align: right; }
+.msg.bot { background: var(--bg-inset); border: 1px solid var(--border-muted); }
+.chat-input { display: flex; gap: 8px; }
+.chat-input input {
+  flex: 1; background: var(--bg-primary); border: 1px solid var(--border);
+  color: var(--text-primary); padding: 10px 12px; border-radius: var(--radius-sm);
+  font-size: 14px; outline: none;
+}
+.chat-input input:focus { border-color: var(--accent-blue); }
+.btn {
+  background: var(--accent-blue); color: var(--bg-primary);
+  border: none; padding: 10px 20px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 14px; font-weight: 600;
+}
+.btn:hover { filter: brightness(1.1); }
+.btn-secondary {
+  background: var(--bg-tertiary); color: var(--text-primary);
+  border: 1px solid var(--border); padding: 8px 14px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 12px;
+}
+.btn-secondary:hover { background: var(--border); }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.chip {
+  background: var(--bg-tertiary); color: var(--text-secondary);
+  border: 1px solid var(--border-muted); padding: 5px 12px; border-radius: 20px;
+  cursor: pointer; font-size: 12px;
+}
+.chip:hover { color: var(--text-primary); border-color: var(--border); }
+.empty-hint { color: var(--text-tertiary); font-size: 13px; padding: 12px 0; text-align: center; }
+.hint { color: var(--text-secondary); font-size: 12px; }
+.skeleton { background: var(--bg-tertiary); border-radius: 4px; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
 
-.tip { color: #8a94a8; font-size: 12px; margin-top: 8px; }
-a { color: #60a5fa; text-decoration: none; }
+/* ========== 扫描视图 ========== */
+.query-box { display: flex; align-items: center; gap: 10px; }
+.query-input {
+  flex: 1; background: var(--bg-primary); border: 1px solid var(--border);
+  color: var(--text-primary); padding: 12px 14px; border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: 14px; outline: none;
+}
+.query-input:focus { border-color: var(--accent-blue); }
+.progress-track { height: 12px; background: var(--bg-tertiary); border-radius: 6px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--accent-blue); border-radius: 6px; transition: width .5s; }
+.timeline { display: flex; gap: 0; margin-top: 12px; }
+.timeline-step { flex: 1; text-align: center; padding: 8px; font-size: 12px; color: var(--text-secondary); position: relative; }
+.timeline-step.done { color: var(--accent-green); }
+.timeline-step.active { color: var(--accent-blue); font-weight: 600; }
+.timeline-step::before {
+  content: ''; position: absolute; top: -8px; left: 50%; transform: translateX(-50%);
+  width: 8px; height: 8px; border-radius: 50%; background: var(--bg-tertiary);
+}
+.timeline-step.done::before { background: var(--accent-green); }
+.timeline-step.active::before { background: var(--accent-blue); }
+
+/* ========== 抽屉 ========== */
+.drawer {
+  position: fixed; top: var(--topbar-height); right: 0; bottom: 0;
+  width: 540px; background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  transform: translateX(100%); transition: transform .3s ease;
+  z-index: 95; overflow-y: auto; padding: 20px;
+}
+.drawer.open { transform: translateX(0); }
+.drawer-overlay {
+  position: fixed; top: var(--topbar-height); right: 0; bottom: 0; left: var(--sidebar-width);
+  background: rgba(0,0,0,.5); display: none; z-index: 94;
+}
+.drawer-overlay.open { display: block; }
+.drawer-tabs { display: flex; gap: 16px; border-bottom: 1px solid var(--border); margin: 12px 0; }
+.drawer-tab { padding: 8px 4px; font-size: 12px; color: var(--text-secondary); cursor: pointer; border-bottom: 2px solid transparent; }
+.drawer-tab.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); font-weight: 600; }
+.vuln-card { background: var(--bg-inset); border: 1px solid var(--border-muted); border-radius: var(--radius-sm); padding: 12px 14px; margin: 8px 0; }
+.vuln-card .cve-id { font-family: var(--font-mono); font-size: 13px; }
+.vuln-card .severity { font-size: 12px; font-weight: 600; }
+
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; }
+  .drawer { width: 100%; }
+}
 </style>
 </head>
 <body>
-<div class="header">
-  <div>
-    <h1>🧠 大脑监控中心</h1>
-    <div class="sub">Supply Chain Distributed Execution · 实时状态</div>
-  </div>
-  <div class="tip">Token 配置于服务端 · <a href="/api/lab/overview" target="_blank">API 原始数据</a></div>
+
+<!-- ========== 顶部栏 ========== -->
+<div class="topbar">
+  <div class="brand"><span class="brand-icon">🛡️</span>软件供应链安全分析平台</div>
+  <div class="spacer"></div>
+  <div class="status-badge"><span class="status-dot"></span><span id="topbar-status">连接中...</span></div>
 </div>
 
-<div class="container">
-  <div class="summary-cards">
-    <div class="sum-card"><div class="label">节点总数</div><div class="num blue" id="s-nodes">-</div></div>
-    <div class="sum-card"><div class="label">在线节点</div><div class="num green" id="s-online">-</div></div>
-    <div class="sum-card"><div class="label">实验总数</div><div class="num" id="s-exp">-</div></div>
-    <div class="sum-card"><div class="label">完成实验</div><div class="num green" id="s-exp-ok">-</div></div>
-    <div class="sum-card"><div class="label">失败实验</div><div class="num red" id="s-exp-err">-</div></div>
-    <div class="sum-card"><div class="label">最近任务</div><div class="num orange" id="s-tasks">-</div></div>
+<!-- ========== 侧边栏 ========== -->
+<div class="sidebar">
+  <div class="sidebar-item active" data-view="overview" onclick="switchView('overview')"><span class="icon">📊</span>概览 / 情报墙</div>
+  <div class="sidebar-item" data-view="scan" onclick="switchView('scan')"><span class="icon">🔍</span>扫描任务</div>
+  <div class="sidebar-item" data-view="assets" onclick="switchView('assets')"><span class="icon">🗄️</span>资产库</div>
+  <div class="sidebar-item" data-view="leaks" onclick="switchView('leaks')"><span class="icon">🔑</span>凭据泄露</div>
+  <div class="sidebar-item" data-view="brain" onclick="switchView('brain')"><span class="icon">🧠</span>大脑监控</div>
+</div>
+
+<!-- ========== 主内容 ========== -->
+<div class="main">
+
+  <!-- ===== 概览 / 情报墙 ===== -->
+  <div class="view active" id="view-overview">
+    <div class="page-title">网络资产与供应链情报</div>
+    <div class="page-desc">聚合资产、漏洞、凭据泄露与研究项目，实时情报墙</div>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="label">资产总数</div><div class="value blue" id="kpi-assets">-</div></div>
+      <div class="kpi-card"><div class="label">严重漏洞</div><div class="value red" id="kpi-vulns">-</div></div>
+      <div class="kpi-card"><div class="label">凭据泄露</div><div class="value orange" id="kpi-leaks">-</div></div>
+      <div class="kpi-card"><div class="label">在线节点</div><div class="value green" id="kpi-nodes">-</div></div>
+    </div>
+    <div class="card">
+      <div class="query-box">
+        <input class="query-input" id="overview-search" placeholder="搜索 IP、域名、URL、标题、组件或 CVE" onkeydown="if(event.key==='Enter')searchOverview()">
+        <button class="btn" onclick="searchOverview()">搜索</button>
+      </div>
+      <div class="chips" style="margin-top:10px">
+        <span class="chip" onclick="setSearch('app=&quot;NGINX&quot;')">Nginx</span>
+        <span class="chip" onclick="setSearch('title=&quot;管理后台&quot;')">管理后台</span>
+        <span class="chip" onclick="setSearch('title=&quot;Open WebUI&quot;')">Open WebUI</span>
+        <span class="chip" onclick="setSearch('title=&quot;Dify&quot;')">Dify</span>
+        <span class="chip" onclick="setSearch('DeepTutor')">DeepTutor</span>
+      </div>
+    </div>
+    <div class="section-label">最近资产</div>
+    <div id="overview-assets"><div class="empty-hint">加载中...</div></div>
   </div>
 
-  <div class="section-title"><span class="dot"></span> 执行引擎实时状态</div>
-  <div class="nodes-grid" id="nodes-grid"><div style="color:#8a94a8">加载中...</div></div>
-
-  <div class="section-title"><span class="dot"></span> 数据可视化</div>
-  <div class="charts">
-    <div class="chart-card"><h3>实验状态分布</h3><div id="chart-status"><div style="color:#8a94a8">加载中...</div></div></div>
-    <div class="chart-card"><h3>各节点实验数</h3><div id="chart-node"><div style="color:#8a94a8">加载中...</div></div></div>
-    <div class="chart-card"><h3>各项目实验数</h3><div id="chart-project"><div style="color:#8a94a8">加载中...</div></div></div>
+  <!-- ===== 扫描任务 ===== -->
+  <div class="view" id="view-scan">
+    <div class="page-title">扫描任务</div>
+    <div class="page-desc">输入有权测试的 URL，或使用 FOFA 发现资产</div>
+    <div class="card">
+      <div class="chips" style="margin-bottom:12px">
+        <span class="chip" style="background:var(--accent-blue);color:var(--bg-primary);font-weight:600">FOFA 资产发现</span>
+        <span class="chip">手动输入 URL</span>
+      </div>
+      <div class="query-box">
+        <input class="query-input" id="scan-query" placeholder='title="管理后台" &amp;&amp; port="8080"'>
+        <button class="btn" onclick="runScan()">开始分析</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>分析进度</h3>
+      <div class="progress-track"><div class="progress-fill" id="scan-progress" style="width:0%"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px">
+        <span class="hint" id="scan-status">等待任务...</span>
+        <span class="hint" id="scan-pct">0%</span>
+      </div>
+      <div class="timeline">
+        <div class="timeline-step active" id="tl-find">发现</div>
+        <div class="timeline-step" id="tl-fingerprint">指纹</div>
+        <div class="timeline-step" id="tl-vuln">漏洞</div>
+        <div class="timeline-step" id="tl-ai">AI</div>
+      </div>
+    </div>
+    <div id="scan-results"></div>
   </div>
 
-  <div class="section-title"><span class="dot"></span> 扫描结果展示</div>
-  <div class="charts">
-    <div class="chart-card" style="grid-column: 1/-1;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0">实验结果列表</h3>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <select id="exp-node-filter" onchange="loadExperiments()" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;">
-            <option value="">全部节点</option>
-          </select>
-          <button onclick="loadExperiments()" style="background:#232d45;color:#c3cad9;border:1px solid #2a3550;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;">刷新</button>
+  <!-- ===== 资产库 ===== -->
+  <div class="view" id="view-assets">
+    <div class="page-title">资产库</div>
+    <div class="page-desc">FoFa 风格资产列表，点击查看详情</div>
+    <div class="card">
+      <div class="card-header">
+        <h3>资产列表</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="query-input" id="asset-search" placeholder="搜索 host / ip / 标题" style="width:220px;padding:8px" onkeydown="if(event.key==='Enter')loadAssets()">
+          <button class="btn-secondary" onclick="loadAssets()">搜索</button>
+          <span class="hint" id="asset-count"></span>
         </div>
       </div>
-      <div class="experiment-list" id="exp-list"><div style="color:#8a94a8">加载中...</div></div>
-    </div>
-  </div>
-
-  <div class="section-title"><span class="dot"></span> 资产库（FoFa 风格）</div>
-  <div class="chart-card" style="grid-column:1/-1;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-      <h3 style="margin:0">资产列表 <span style="color:#8a94a8;font-size:12px;font-weight:400">(host / ip / 端口 / 协议 / 标题 / 国家 / 城市 / 更新时间)</span></h3>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <input id="asset-search" placeholder="搜索 host / ip / 标题" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;width:220px;" onkeydown="if(event.key==='Enter')loadAssets()">
-        <button onclick="loadAssets()" style="background:#3b82f6;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;">搜索</button>
-        <span class="tip" id="asset-count"></span>
+      <div style="overflow-x:auto">
+        <table class="asset-table">
+          <thead><tr>
+            <th>Host</th><th>IP</th><th>Port</th><th>协议</th><th>标题</th><th>国家</th><th>城市</th><th>来源</th>
+          </tr></thead>
+          <tbody id="asset-table"><tr><td colspan="8" class="empty-hint">加载中...</td></tr></tbody>
+        </table>
       </div>
     </div>
-    <div style="overflow-x:auto;">
-      <table style="width:100%;border-collapse:collapse;font-size:12px;">
-        <thead>
-          <tr style="color:#8a94a8;text-align:left;border-bottom:1px solid #2a3550;">
-            <th style="padding:8px">Host</th><th style="padding:8px">IP</th><th style="padding:8px">Port</th>
-            <th style="padding:8px">协议</th><th style="padding:8px">标题</th><th style="padding:8px">国家</th>
-            <th style="padding:8px">城市</th><th style="padding:8px">更新时间</th><th style="padding:8px">来源项目</th>
-          </tr>
-        </thead>
-        <tbody id="asset-table"><tr><td colspan="9" style="padding:16px;color:#8a94a8;text-align:center">加载中...</td></tr></tbody>
-      </table>
-    </div>
   </div>
 
-  <div class="section-title"><span class="dot"></span> 研究大脑情报</div>
-  <div class="charts">
-    <div class="chart-card" style="grid-column: 1/-1;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <h3 style="margin:0">热门 GitHub 项目部署</h3>
-        <span class="tip" id="research-status"></span>
+  <!-- ===== 凭据泄露 ===== -->
+  <div class="view" id="view-leaks">
+    <div class="page-title">凭据泄露</div>
+    <div class="page-desc">全量 API 遍历发现的 Provider / Base URL / API Key 三元组</div>
+    <div class="kpi-grid" id="leak-kpis"></div>
+    <div class="card">
+      <div class="card-header">
+        <h3>泄露记录</h3>
+        <div style="display:flex;gap:8px">
+          <button class="btn-secondary" onclick="loadLeaks()">刷新</button>
+        </div>
       </div>
-      <div id="project-deploy"><div style="color:#8a94a8">加载中...</div></div>
+      <div id="leak-list"><div class="empty-hint">加载中...</div></div>
     </div>
-    <div class="chart-card"><h3>FoFa 热搜组件</h3><div id="fofa-hot"><div style="color:#8a94a8">加载中...</div></div></div>
-    <div class="chart-card"><h3>趋势信号</h3><div id="trend-signals"><div style="color:#8a94a8">加载中...</div></div></div>
-    <div class="chart-card"><h3>研究运行记录</h3><div id="research-runs"><div style="color:#8a94a8">加载中...</div></div></div>
   </div>
 
-  <div class="section-title"><span class="dot"></span> 与大脑对话</div>
-  <div class="chat-box">
-    <div class="chat-history" id="chat-history">
-      <div class="msg bot">你好！我是大脑控制台。你可以让我查看节点状态、统计实验数据，或下发扫描任务。</div>
+  <!-- ===== 大脑监控 ===== -->
+  <div class="view" id="view-brain">
+    <div class="page-title">大脑监控中心</div>
+    <div class="page-desc">执行引擎实时状态 · 数据可视化 · 研究大脑情报</div>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="label">节点总数</div><div class="value blue" id="s-nodes">-</div></div>
+      <div class="kpi-card"><div class="label">在线节点</div><div class="value green" id="s-online">-</div></div>
+      <div class="kpi-card"><div class="label">实验总数</div><div class="value" id="s-exp">-</div></div>
+      <div class="kpi-card"><div class="label">完成实验</div><div class="value green" id="s-exp-ok">-</div></div>
+      <div class="kpi-card"><div class="label">失败实验</div><div class="value red" id="s-exp-err">-</div></div>
     </div>
-    <div class="chat-input">
-      <input id="chat-input" placeholder="例如：查看所有节点状态 / 统计实验数据 / 用 fofa 扫描 50 个 nginx 资产" onkeydown="if(event.key==='Enter')sendChat()">
-      <button onclick="sendChat()">发送</button>
+    <div class="section-label">执行引擎实时状态</div>
+    <div class="nodes-grid" id="nodes-grid"><div class="empty-hint">加载中...</div></div>
+    <div class="section-label">数据可视化</div>
+    <div class="charts">
+      <div class="chart-card"><h3>实验状态分布</h3><div id="chart-status"><div class="empty-hint">加载中...</div></div></div>
+      <div class="chart-card"><h3>各节点实验数</h3><div id="chart-node"><div class="empty-hint">加载中...</div></div></div>
+      <div class="chart-card"><h3>各项目实验数</h3><div id="chart-project"><div class="empty-hint">加载中...</div></div></div>
     </div>
-    <div class="quick-actions">
-      <button onclick="quickChat('查看所有节点状态')">节点状态</button>
-      <button onclick="quickChat('统计实验数据')">数据统计</button>
-      <button onclick="quickChat('用 fofa 扫描 50 个 nginx 资产')">下发 fofa 扫描</button>
-      <button onclick="quickChat('检测漏洞')">漏洞检测</button>
-      <button onclick="quickChat('技术指纹')">技术指纹</button>
+    <div class="section-label">研究大脑情报</div>
+    <div class="charts">
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="card-header"><h3>热门 GitHub 项目部署</h3><span class="hint" id="research-status"></span></div>
+        <div id="project-deploy"><div class="empty-hint">加载中...</div></div>
+      </div>
+      <div class="chart-card"><h3>FoFa 热搜组件</h3><div id="fofa-hot"><div class="empty-hint">加载中...</div></div></div>
+      <div class="chart-card"><h3>趋势信号</h3><div id="trend-signals"><div class="empty-hint">加载中...</div></div></div>
+      <div class="chart-card"><h3>研究运行记录</h3><div id="research-runs"><div class="empty-hint">加载中...</div></div></div>
+    </div>
+    <div class="section-label">与大脑对话</div>
+    <div class="chat-box">
+      <div class="chat-history" id="chat-history">
+        <div class="msg bot">你好！我是大脑控制台。可以查看节点状态、统计实验数据、下发扫描任务，或全量遍历 API 发现凭据泄露。</div>
+      </div>
+      <div class="chat-input">
+        <input id="chat-input" placeholder="例如：查看所有节点状态 / 用 fofa 扫描 50 个 nginx 资产 / 统计实验数据" onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn" onclick="sendChat()">发送</button>
+      </div>
+      <div class="chips">
+        <span class="chip" onclick="quickChat('查看所有节点状态')">节点状态</span>
+        <span class="chip" onclick="quickChat('统计实验数据')">数据统计</span>
+        <span class="chip" onclick="quickChat('用 fofa 扫描 50 个 nginx 资产')">fofa 扫描</span>
+        <span class="chip" onclick="quickChat('检测漏洞')">漏洞检测</span>
+        <span class="chip" onclick="quickChat('技术指纹')">技术指纹</span>
+      </div>
     </div>
   </div>
+</div>
+
+<!-- ========== 抽屉 ========== -->
+<div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="card-header"><h3>资产详情</h3><button class="btn-secondary" onclick="closeDrawer()">✕</button></div>
+  <div id="drawer-host" style="font-family:var(--font-mono);color:var(--accent-blue);font-size:14px;margin-bottom:12px"></div>
+  <div class="drawer-tabs">
+    <div class="drawer-tab active" data-tab="vuln" onclick="switchDrawerTab('vuln')">漏洞</div>
+    <div class="drawer-tab" data-tab="tech" onclick="switchDrawerTab('tech')">技术栈</div>
+    <div class="drawer-tab" data-tab="secret" onclick="switchDrawerTab('secret')">敏感信息</div>
+    <div class="drawer-tab" data-tab="api" onclick="switchDrawerTab('api')">API</div>
+  </div>
+  <div id="drawer-content"><div class="empty-hint">加载中...</div></div>
 </div>
 
 <script>
-const TOKEN = ''; // 若服务端开启 token 鉴权，填在这里
+const TOKEN = '';
+const VIEWS = ['overview','scan','assets','leaks','brain'];
 
 async function api(path, method='GET', body=null) {
   const headers = {'Content-Type': 'application/json'};
@@ -187,300 +469,317 @@ async function api(path, method='GET', body=null) {
   const r = await fetch(path, opts);
   return r.json();
 }
-
+function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 function fmtBytes(b) {
   if (!b) return 'N/A';
   if (b > 1024**3) return (b/1024**3).toFixed(1)+'G';
   if (b > 1024**2) return (b/1024**2).toFixed(1)+'M';
   return (b/1024).toFixed(1)+'K';
 }
-function fmtUptime(s) {
-  if (!s) return 'N/A';
-  const h = Math.floor(s/3600); const m = Math.floor((s%3600)/60);
-  return h>0 ? `${h}h${m}m` : `${m}m`;
-}
-function pct(used, total) { return total ? Math.round(used/total*100) : 0; }
+function pct(u,t) { return t ? Math.round(u/t*100) : 0; }
 
+/* ===== 视图切换 ===== */
+function switchView(v) {
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.toggle('active', i.dataset.view === v));
+  document.querySelectorAll('.view').forEach(x => x.classList.toggle('active', x.id === 'view-' + v));
+}
+function setSearch(q) {
+  document.getElementById('overview-search').value = q;
+  switchView('scan');
+  document.getElementById('scan-query').value = q;
+}
+
+/* ===== 概览 ===== */
+async function loadOverview() {
+  try {
+    const [mon, assets, leaks] = await Promise.all([
+      api('/api/monitor/overview'), api('/api/assets?limit=50'), api('/api/leaks/stats')
+    ]);
+    document.getElementById('kpi-assets').textContent = (mon.summary?.total_experiments||0) + ' 实验';
+    document.getElementById('kpi-vulns').textContent = '-';
+    document.getElementById('kpi-leaks').textContent = leaks.total || 0;
+    document.getElementById('kpi-nodes').textContent = (mon.summary?.online_nodes||0) + '/' + (mon.summary?.total_nodes||0);
+    const el = document.getElementById('overview-assets');
+    const list = assets.assets || [];
+    el.innerHTML = list.slice(0, 6).map(a => `
+      <div class="node-card" style="margin-bottom:8px;cursor:pointer" onclick="openAssetDetail('${escapeHtml(a.host||a.ip||'')}')">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-family:var(--font-mono);color:var(--accent-blue)">${escapeHtml(a.host||a.ip)}</div>
+            <div class="hint">${escapeHtml(a.server||a.protocol||'')} · ${escapeHtml(a.ip||'')} · ${escapeHtml(a.country||'')}${a.city?' / '+escapeHtml(a.city):''}</div>
+          </div>
+          <span class="tag blue">${escapeHtml(String(a.port||''))}</span>
+        </div>
+      </div>`).join('') || '<div class="empty-hint">暂无资产，先在对话区下发 fofa 扫描任务</div>';
+  } catch(e) { document.getElementById('overview-assets').innerHTML = '<div class="empty-hint">加载失败</div>'; }
+}
+
+/* ===== 扫描 ===== */
+async function runScan() {
+  const q = document.getElementById('scan-query').value.trim();
+  if (!q) return;
+  document.getElementById('scan-status').textContent = '正在下发任务...';
+  document.getElementById('scan-progress').style.width = '10%';
+  document.getElementById('scan-pct').textContent = '10%';
+  const r = await api('/api/chat', 'POST', {message: '用 fofa 扫描 ' + q});
+  document.getElementById('scan-status').textContent = r.reply || r.error || '已下发';
+  document.getElementById('scan-progress').style.width = '30%';
+  document.getElementById('scan-pct').textContent = '30%';
+  setTimeout(loadScanResults, 5000);
+}
+async function loadScanResults() {
+  const d = await api('/api/experiments');
+  const el = document.getElementById('scan-results');
+  const list = d.experiments || [];
+  if (!list.length) { el.innerHTML = ''; return; }
+  const latest = list[0];
+  document.getElementById('scan-status').textContent = latest.public_observation || latest.status;
+  document.getElementById('scan-progress').style.width = '100%';
+  document.getElementById('scan-pct').textContent = '100%';
+  document.getElementById('tl-find').classList.add('done');
+  document.getElementById('tl-fingerprint').classList.add('done');
+  document.getElementById('tl-vuln').classList.add('done');
+  el.innerHTML = renderExperiments(list.slice(0,5));
+}
+
+/* ===== 资产库 ===== */
+async function loadAssets() {
+  const q = document.getElementById('asset-search')?.value.trim() || '';
+  const url = q ? '/api/assets?query=' + encodeURIComponent(q) : '/api/assets?limit=100';
+  const d = await api(url);
+  document.getElementById('asset-count').textContent = '共 ' + d.total + ' 个';
+  const tbody = document.getElementById('asset-table');
+  tbody.innerHTML = '';
+  if (!d.assets?.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-hint">暂无资产</td></tr>'; return; }
+  d.assets.forEach(a => {
+    const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    tr.onclick = () => openAssetDetail(a.host || a.ip || '');
+    tr.innerHTML = `
+      <td class="mono host">${escapeHtml(a.host||a.url||'-')}</td>
+      <td class="mono">${escapeHtml(a.ip||'-')}</td>
+      <td class="mono">${escapeHtml(String(a.port||'-'))}</td>
+      <td>${escapeHtml(a.protocol||'-')}</td>
+      <td>${escapeHtml((a.title||'').slice(0,40)||'-')}</td>
+      <td>${escapeHtml(a.country||'-')}</td>
+      <td>${escapeHtml(a.city||'-')}</td>
+      <td class="hint">${escapeHtml(a.project_slug||'-')}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+/* ===== 抽屉 ===== */
+async function openAssetDetail(host) {
+  document.getElementById('drawer-host').textContent = host;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer-overlay').classList.add('open');
+  // 从实验结果里找该资产的分析
+  const d = await api('/api/experiments');
+  let content = '<div class="empty-hint">该资产暂无深度分析数据，可在对话区下发 deep_analysis</div>';
+  for (const e of d.experiments || []) {
+    for (const item of e.evidence || []) {
+      const target = item.target || item.host || '';
+      if (host && target.includes(host)) {
+        const vulns = (item.vulnerabilities || []).map(v => `
+          <div class="vuln-card">
+            <div class="cve-id">${escapeHtml(v.cve_id||v.id||'漏洞')}</div>
+            <div class="severity ${(v.severity||'').includes('高')?'vuln-item':'vuln-high'}">${escapeHtml(v.severity||'')} · ${escapeHtml(v.score||'')}</div>
+          </div>`).join('') || '<div class="hint">无已知漏洞</div>';
+        const secrets = (item.sensitive_hits||[]).map(s => `
+          <div class="leak-item"><div class="leak-key">${escapeHtml(s.secret_type||s.type||'')}: ${escapeHtml(s.value_masked||'')}</div>
+          <div class="leak-meta">${escapeHtml(s.source||s.path||s.endpoint||'')}</div></div>`).join('') || '<div class="hint">无敏感信息</div>';
+        content = `<div data-panel="vuln">${vulns}</div>
+          <div data-panel="tech" style="display:none">${(item.technologies||[]).map(t=>`<div class="metric-row"><span class="k">${escapeHtml(t.name||'')}</span><span class="v">${escapeHtml(t.version||'')}</span></div>`).join('')||'<div class="hint">无技术栈数据</div>'}</div>
+          <div data-panel="secret" style="display:none">${secrets}</div>
+          <div data-panel="api" style="display:none"><div class="hint">${escapeHtml(String((item.api_endpoints||[]).length))} 个 API 端点</div></div>`;
+        break;
+      }
+    }
+  }
+  document.getElementById('drawer-content').innerHTML = content;
+}
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawer-overlay').classList.remove('open');
+}
+function switchDrawerTab(tab) {
+  document.querySelectorAll('.drawer-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('#drawer-content [data-panel]').forEach(p => p.style.display = p.dataset.panel === tab ? 'block' : 'none');
+}
+
+/* ===== 凭据泄露 ===== */
+async function loadLeaks() {
+  try {
+    const [list, stats] = await Promise.all([api('/api/leaks?limit=100'), api('/api/leaks/stats')]);
+    const kpi = document.getElementById('leak-kpis');
+    const byType = stats.by_type || {};
+    kpi.innerHTML = `
+      <div class="kpi-card"><div class="label">泄露总数</div><div class="value red">${stats.total||0}</div></div>
+      <div class="kpi-card"><div class="label">LLM API Key</div><div class="value orange">${byType['LLM API Key']||0}</div></div>
+      <div class="kpi-card"><div class="label">敏感信息</div><div class="value">${Object.entries(byType).filter(([k])=>k!=='LLM API Key').reduce((a,[,v])=>a+v,0)}</div></div>`;
+    const el = document.getElementById('leak-list');
+    const leaks = list.leaks || [];
+    if (!leaks.length) { el.innerHTML = '<div class="empty-hint">暂无泄露记录，下发 api_crawl 任务扫描资产</div>'; return; }
+    el.innerHTML = leaks.map(l => `
+      <div class="leak-item">
+        <div class="leak-key">${escapeHtml(l.api_key_masked||'(敏感信息)')}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+          <span class="tag blue">${escapeHtml(l.provider||'unknown')}</span>
+          <span class="tag">${escapeHtml(l.secret_type||'')}</span>
+          <span class="tag green">${escapeHtml(l.target||'')}</span>
+        </div>
+        <div class="leak-meta">Base URL: ${escapeHtml(l.base_url||'-')} · 来源: ${escapeHtml(l.source_path||'-')} · 节点: ${escapeHtml(l.node_id||'-')}</div>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('leak-list').innerHTML = '<div class="empty-hint">加载失败: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+/* ===== 大脑监控 ===== */
 async function loadMonitor() {
   const d = await api('/api/monitor/overview');
-  if (!d.summary) { console.error(d); return; }
-  const s = d.summary;
-  document.getElementById('s-nodes').textContent = s.total_nodes;
-  document.getElementById('s-online').textContent = s.online_nodes;
-  document.getElementById('s-exp').textContent = s.total_experiments;
-  document.getElementById('s-exp-ok').textContent = s.completed_experiments;
-  document.getElementById('s-exp-err').textContent = s.error_experiments;
-  document.getElementById('s-tasks').textContent = s.total_tasks;
-
+  const s = d.summary || {};
+  document.getElementById('s-nodes').textContent = s.total_nodes || 0;
+  document.getElementById('s-online').textContent = s.online_nodes || 0;
+  document.getElementById('s-exp').textContent = s.total_experiments || 0;
+  document.getElementById('s-exp-ok').textContent = s.completed_experiments || 0;
+  document.getElementById('s-exp-err').textContent = s.error_experiments || 0;
+  document.getElementById('topbar-status').textContent = (s.online_nodes||0) + '/' + (s.total_nodes||0) + ' 节点在线';
   const grid = document.getElementById('nodes-grid');
   grid.innerHTML = '';
-  if (!d.nodes.length) { grid.innerHTML = '<div style="color:#8a94a8">暂无节点</div>'; }
-  d.nodes.forEach(n => {
+  (d.nodes||[]).forEach(n => {
     const m = n.metrics || {};
     const cpu = m.cpu_percent != null ? m.cpu_percent : 0;
     const memPct = pct(m.mem_used, m.mem_total);
-    const diskPct = pct(m.disk_total-m.disk_free, m.disk_total);
+    const diskPct = pct((m.disk_total||0)-(m.disk_free||0), m.disk_total);
     const card = document.createElement('div');
-    card.className = 'node-card';
+    card.className = 'node-card' + (n.online ? '' : ' offline');
     card.innerHTML = `
       <div class="node-head">
-        <div><div class="node-name">${n.name||n.node_id}</div><div class="node-id">${n.node_id}</div></div>
-        <span class="status-badge ${n.online?'online':'offline'}">${n.online?'在线':'离线'}</span>
+        <div><div class="node-name">${escapeHtml(n.name||n.node_id)}</div><div class="node-id">${escapeHtml(n.node_id||'')}</div></div>
+        <span class="badge ${n.online?'online':'offline'}">${n.online?'在线':'离线'}</span>
       </div>
       <div class="metric-row"><span class="k">CPU</span><span class="v">${cpu}%</span></div>
       <div class="bar"><div class="bar-fill cpu" style="width:${Math.min(cpu,100)}%"></div></div>
       <div class="metric-row"><span class="k">内存</span><span class="v">${fmtBytes(m.mem_used)} / ${fmtBytes(m.mem_total)}</span></div>
       <div class="bar"><div class="bar-fill mem" style="width:${Math.min(memPct,100)}%"></div></div>
-      <div class="metric-row"><span class="k">磁盘</span><span class="v">${fmtBytes(m.disk_total-m.disk_free)} / ${fmtBytes(m.disk_total)}</span></div>
+      <div class="metric-row"><span class="k">磁盘</span><span class="v">${fmtBytes((m.disk_total||0)-(m.disk_free||0))} / ${fmtBytes(m.disk_total)}</span></div>
       <div class="bar"><div class="bar-fill disk" style="width:${Math.min(diskPct,100)}%"></div></div>
       <div class="metric-row"><span class="k">负载</span><span class="v">${m.load1??'N/A'} / ${m.load5??'N/A'} / ${m.load15??'N/A'}</span></div>
-      <div class="metric-row"><span class="k">运行时长</span><span class="v">${fmtUptime(m.uptime)}</span></div>
-      <div class="metric-row"><span class="k">能力</span><span class="v">${(n.capabilities||[]).join(', ')}</span></div>
-    `;
+      <div class="metric-row"><span class="k">能力</span><span class="v">${(n.capabilities||[]).join(', ')}</span></div>`;
     grid.appendChild(card);
   });
-
-  // 节点下拉过滤选项
-  const filter = document.getElementById('exp-node-filter');
-  if (filter.options.length <= 1) {
-    d.nodes.forEach(n => {
-      const opt = document.createElement('option');
-      opt.value = n.node_id;
-      opt.textContent = n.name + ' (' + n.node_id + ')';
-      filter.appendChild(opt);
-    });
-  }
-}
-
-// 渲染单条实验详情（evidence 展示）
-function renderEvidence(ev) {
-  if (!Array.isArray(ev) || !ev.length) return '<div style="color:#8a94a8;padding:8px 0">无 evidence 数据</div>';
-  return ev.map((item, i) => {
-    const target = item.target || item.url || item.host || ('条目 ' + (i+1));
-    const rows = [];
-    // 技术栈
-    if (item.technologies && item.technologies.length) {
-      const techs = item.technologies.map(t => (t.name||t) + (t.version?(' '+t.version):'') + (t.category?(' <span style="color:#8a94a8">['+t.category+']</span>'):'')).join('，');
-      rows.push(`<div class="metric-row"><span class="k">技术栈</span><span class="v">${escapeHtml(techs)}</span></div>`);
-    }
-    // 漏洞
-    if (item.vulnerabilities && item.vulnerabilities.length) {
-      const vulns = item.vulnerabilities.map(v => {
-        const id = v.cve_id || v.id || v.name || '漏洞';
-        const sev = v.severity ? ` <span style="color:#f87171">[${v.severity}]</span>` : '';
-        return escapeHtml(id) + sev;
-      }).join('<br>');
-      rows.push(`<div class="metric-row"><span class="k">漏洞</span><span class="v" style="text-align:right">${vulns}</span></div>`);
-    }
-    // API 报告
-    if (item.report) {
-      const r = item.report;
-      const risk = r.risk_level ? ` <span style="color:${r.risk_level==='高'?'#f87171':r.risk_level==='中'?'#fbbf24':'#4ade80'}">[风险:${r.risk_level}]</span>` : '';
-      rows.push(`<div class="metric-row"><span class="k">API 报告</span><span class="v">${escapeHtml(r.summary||r.total_endpoints||'')}${risk}</span></div>`);
-    }
-    // 错误
-    if (item.error) {
-      rows.push(`<div class="metric-row"><span class="k">错误</span><span class="v" style="color:#f87171">${escapeHtml(item.error)}</span></div>`);
-    }
-    // 其他字段
-    const others = Object.entries(item).filter(([k]) => !['target','url','host','technologies','vulnerabilities','report','error'].includes(k));
-    others.forEach(([k,v]) => {
-      if (v === null || v === undefined || v === '') return;
-      const vs = typeof v === 'object' ? JSON.stringify(v) : String(v);
-      if (vs.length > 200) return;
-      rows.push(`<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(vs)}</span></div>`);
-    });
-    if (!rows.length) {
-      rows.push(`<div style="color:#8a94a8;padding:6px 0">${escapeHtml(JSON.stringify(item))}</div>`);
-    }
-    return `<div style="background:#0f1420;border:1px solid #232d45;border-radius:8px;padding:8px 12px;margin:6px 0;">
-      <div style="font-family:monospace;color:#60a5fa;font-size:12px;margin-bottom:4px;">${escapeHtml(target)}</div>
-      ${rows.join('')}
-    </div>`;
-  }).join('');
-}
-
-async function loadExperiments() {
-  const filter = document.getElementById('exp-node-filter');
-  const nodeId = filter.value;
-  const url = nodeId ? '/api/experiments?node_id=' + nodeId : '/api/experiments';
-  const d = await api(url);
-  const list = document.getElementById('exp-list');
-  list.innerHTML = '';
-  if (!d.experiments || !d.experiments.length) { list.innerHTML = '<div style="color:#8a94a8">暂无实验结果</div>'; return; }
-  d.experiments.forEach(e => {
-    const item = document.createElement('div');
-    item.className = 'exp-item';
-    item.style.display = 'block';
-    item.innerHTML = `
-      <div style="display:flex;justify-content:space-between;cursor:pointer;" onclick="this.parentElement.querySelector('.exp-detail').style.display = this.parentElement.querySelector('.exp-detail').style.display==='none'?'block':'none'">
-        <div class="exp-left">
-          <div><strong>${escapeHtml(e.project_name||e.project_slug||'未知项目')}</strong> <span style="color:#8a94a8;font-size:12px">${e.node_id||''} · ${new Date((e.created_at||0)*1000).toLocaleString()}</span></div>
-          <div style="color:#8a94a8;font-size:12px">${escapeHtml((e.public_observation||e.hypothesis||'').slice(0,80))}</div>
-        </div>
-        <span class="exp-status ${e.status}">${e.status} ▾</span>
-      </div>
-      <div class="exp-detail" style="display:none;margin-top:10px;">
-        <div class="metric-row"><span class="k">实验 ID</span><span class="v">${e.experiment_id||''}</span></div>
-        ${e.reproduction_summary ? `<div class="metric-row"><span class="k">摘要</span><span class="v">${escapeHtml(String(e.reproduction_summary).slice(0,120))}</span></div>` : ''}
-        ${renderEvidence(e.evidence)}
-      </div>
-    `;
-    list.appendChild(item);
-  });
+  if (!(d.nodes||[]).length) grid.innerHTML = '<div class="empty-hint">暂无节点</div>';
 }
 
 async function loadAnalytics() {
   const d = await api('/api/analytics');
-  // 状态分布
-  const statusEl = document.getElementById('chart-status');
   const byStatus = d.by_status || {};
-  const colors = {completed:'#4ade80', error:'#f87171', planned:'#fbbf24', running:'#60a5fa'};
   const total = Object.values(byStatus).reduce((a,b)=>a+b,0);
-  statusEl.innerHTML = Object.entries(byStatus).map(([k,v]) =>
-    `<div class="metric-row"><span class="k">${k}</span><span class="v">${v} (${total?Math.round(v/total*100):0}%)</span></div>`).join('')
-    || '<div style="color:#8a94a8">暂无数据</div>';
-
-  // 节点分布
-  const nodeEl = document.getElementById('chart-node');
+  document.getElementById('chart-status').innerHTML = Object.entries(byStatus).map(([k,v]) =>
+    `<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${v} (${total?Math.round(v/total*100):0}%)</span></div>`).join('') || '<div class="empty-hint">暂无数据</div>';
   const byNode = d.by_node || {};
-  const nodeTotal = Object.values(byNode).reduce((a,b)=>a+b,0);
-  nodeEl.innerHTML = Object.entries(byNode).map(([k,v]) => {
-    const p = nodeTotal?Math.round(v/nodeTotal*100):0;
-    return `<div class="metric-row"><span class="k">${k}</span><span class="v">${v} 条</span></div>
-            <div class="bar"><div class="bar-fill cpu" style="width:${p}%"></div></div>`;
-  }).join('') || '<div style="color:#8a94a8">暂无数据</div>';
-
-  // 项目分布
-  const projectEl = document.getElementById('chart-project');
+  const nt = Object.values(byNode).reduce((a,b)=>a+b,0);
+  document.getElementById('chart-node').innerHTML = Object.entries(byNode).map(([k,v]) => {
+    const p = nt ? Math.round(v/nt*100) : 0;
+    return `<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${v} 条</span></div><div class="bar"><div class="bar-fill cpu" style="width:${p}%"></div></div>`;
+  }).join('') || '<div class="empty-hint">暂无数据</div>';
   const byProject = d.by_project || {};
-  const projTotal = Object.values(byProject).reduce((a,b)=>a+b,0);
-  projectEl.innerHTML = Object.entries(byProject).map(([k,v]) => {
-    const p = projTotal?Math.round(v/projTotal*100):0;
-    return `<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${v} 条</span></div>
-            <div class="bar"><div class="bar-fill mem" style="width:${p}%"></div></div>`;
-  }).join('') || '<div style="color:#8a94a8">暂无数据</div>';
-}
-
-async function loadAssets() {
-  const q = document.getElementById('asset-search').value.trim();
-  const url = q ? '/api/assets?query=' + encodeURIComponent(q) : '/api/assets';
-  const d = await api(url);
-  const tbody = document.getElementById('asset-table');
-  const countEl = document.getElementById('asset-count');
-  countEl.textContent = '共 ' + d.total + ' 个资产';
-  tbody.innerHTML = '';
-  if (!d.assets || !d.assets.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="padding:16px;color:#8a94a8;text-align:center">暂无资产，先在对话区下发 fofa 扫描任务</td></tr>';
-    return;
-  }
-  d.assets.forEach(a => {
-    const tr = document.createElement('tr');
-    tr.style.borderBottom = '1px solid #232d45';
-    const host = a.host || a.url || '-';
-    const title = (a.title || '').slice(0, 40) || '-';
-    const server = a.server || '';
-    tr.innerHTML = `
-      <td style="padding:8px;color:#60a5fa;font-family:monospace">${escapeHtml(host)}</td>
-      <td style="padding:8px;font-family:monospace">${escapeHtml(a.ip || '-')}</td>
-      <td style="padding:8px;font-family:monospace">${escapeHtml(String(a.port || '-'))}</td>
-      <td style="padding:8px">${escapeHtml(a.protocol || '-')}</td>
-      <td style="padding:8px">${escapeHtml(title)}${server?`<div style="color:#8a94a8;font-size:11px">${escapeHtml(server.slice(0,30))}</div>`:''}</td>
-      <td style="padding:8px">${escapeHtml(a.country || '-')}</td>
-      <td style="padding:8px">${escapeHtml(a.city || '-')}</td>
-      <td style="padding:8px;color:#8a94a8;font-size:11px">${a.lastupdatetime || a.last_seen ? escapeHtml((a.lastupdatetime || '').slice(0,19)) : '-'}</td>
-      <td style="padding:8px;color:#8a94a8;font-size:11px">${escapeHtml(a.project_slug || '-')}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+  const pt = Object.values(byProject).reduce((a,b)=>a+b,0);
+  document.getElementById('chart-project').innerHTML = Object.entries(byProject).map(([k,v]) => {
+    const p = pt ? Math.round(v/pt*100) : 0;
+    return `<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${v} 条</span></div><div class="bar"><div class="bar-fill mem" style="width:${p}%"></div></div>`;
+  }).join('') || '<div class="empty-hint">暂无数据</div>';
 }
 
 async function loadResearch() {
   const d = await api('/api/research/overview');
-  document.getElementById('research-status').textContent =
-    (d.enabled ? '研究大脑运行中' : '已禁用') + ' · 模型 ' + d.model + ' · 周期 ' + Math.round(d.interval_seconds/60) + ' 分钟';
-
-  // 热门项目部署
-  const projEl = document.getElementById('project-deploy');
+  document.getElementById('research-status').textContent = (d.enabled ? '运行中' : '已禁用') + ' · ' + d.model + ' · 周期 ' + Math.round((d.interval_seconds||0)/60) + ' 分钟';
+  const proj = document.getElementById('project-deploy');
   const projects = d.projects || [];
-  if (!projects.length) { projEl.innerHTML = '<div style="color:#8a94a8">暂无研究项目</div>'; }
-  else {
-    projEl.innerHTML = projects.map(p => `
-      <div style="background:#0f1420;border:1px solid #232d45;border-radius:8px;padding:10px 12px;margin:6px 0;display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div><strong>${escapeHtml(p.name||'')}</strong> <span style="color:#8a94a8;font-size:11px">${escapeHtml(p.category||'')} · 优先级 ${p.priority||'-'}</span></div>
-          <div style="color:#8a94a8;font-size:11px">${p.repository?`<a href="${escapeHtml(p.repository)}" target="_blank" style="color:#60a5fa">${escapeHtml(p.repository)}</a>`:''}</div>
-          <div style="color:#8a94a8;font-size:11px;margin-top:2px">${escapeHtml((p.rationale||'').slice(0,90))}</div>
-        </div>
-        <div style="text-align:right;flex-shrink:0;margin-left:12px">
-          <div><span style="color:#60a5fa;font-weight:600;font-size:18px">${p.asset_count||0}</span> <span style="color:#8a94a8;font-size:11px">资产</span></div>
-          <div style="color:#4ade80;font-size:11px">已分析 ${p.analyzed_count||0}</div>
-          <div style="color:#8a94a8;font-size:11px">待处理 ${p.pending_count||0}</div>
-        </div>
-      </div>`).join('');
-  }
-
-  // FoFa 热搜组件
-  const hotEl = document.getElementById('fofa-hot');
+  proj.innerHTML = projects.map(p => `
+    <div class="project-row">
+      <div>
+        <div><strong>${escapeHtml(p.name||'')}</strong> <span class="hint">${escapeHtml(p.category||'')} · P${p.priority||'-'}</span></div>
+        <div class="hint">${p.repository?`<a href="${escapeHtml(p.repository)}" target="_blank">${escapeHtml(p.repository)}</a>`:''}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0;margin-left:12px">
+        <div><span class="asset-num">${p.asset_count||0}</span> <span class="hint">资产</span></div>
+        <div class="hint" style="color:var(--accent-green)">已分析 ${p.analyzed_count||0}</div>
+      </div>
+    </div>`).join('') || '<div class="empty-hint">暂无项目</div>';
   const signals = (d.trends && d.trends.signals) || [];
-  if (!signals.length) { hotEl.innerHTML = '<div style="color:#8a94a8">暂无热搜数据</div>'; }
-  else {
-    hotEl.innerHTML = signals.slice(0, 12).map((s,i) => `
-      <div class="metric-row">
-        <span class="k"><span style="color:${i<3?'#fbbf24':'#8a94a8'};font-weight:${i<3?'700':'400'}">${i+1}.</span> ${escapeHtml(s.name||'')} ${s.is_hot?'<span style="color:#f87171">🔥</span>':''}</span>
-        <span class="v">${s.hot_score||0} 热度</span>
-      </div>`).join('');
-  }
-
-  // 趋势信号
-  const sigEl = document.getElementById('trend-signals');
-  sigEl.innerHTML = signals.slice(0, 10).map(s => {
-    const statusColor = s.status === 'promoted' ? '#4ade80' : s.status === 'observe' ? '#fbbf24' : '#8a94a8';
-    return `<div class="metric-row">
-      <span class="k">${escapeHtml(s.name||'')}</span>
-      <span class="v" style="color:${statusColor}">${s.status||''} · ${s.momentum||0} 动量</span>
-    </div>`;
-  }).join('') || '<div style="color:#8a94a8">暂无信号</div>';
-
-  // 研究运行记录
-  const runsEl = document.getElementById('research-runs');
+  document.getElementById('fofa-hot').innerHTML = signals.slice(0,12).map((s,i) => `
+    <div class="rank-item"><span class="k ${i<3?'rank-top':''}">${i+1}. ${escapeHtml(s.name||'')} ${s.is_hot?'🔥':''}</span><span class="v">${s.hot_score||0}</span></div>`).join('') || '<div class="empty-hint">暂无热搜</div>';
+  document.getElementById('trend-signals').innerHTML = signals.slice(0,10).map(s => `
+    <div class="metric-row"><span class="k">${escapeHtml(s.name||'')}</span><span class="v">${escapeHtml(s.status||'')} · ${s.momentum||0}</span></div>`).join('') || '<div class="empty-hint">暂无信号</div>';
   const runs = d.runs || [];
-  runsEl.innerHTML = runs.slice(0, 8).map(r => `
-    <div class="metric-row">
-      <span class="k">${escapeHtml(r.project_name||'')}</span>
-      <span class="v" style="color:${r.status==='completed'?'#4ade80':r.status==='error'?'#f87171':'#fbbf24'}">${r.status||''} · ${r.discovered_count||0}发现</span>
-    </div>`).join('') || '<div style="color:#8a94a8">暂无运行记录</div>';
+  document.getElementById('research-runs').innerHTML = runs.slice(0,8).map(r => `
+    <div class="metric-row"><span class="k">${escapeHtml(r.project_name||'')}</span><span class="v" style="color:${r.status==='completed'?'var(--accent-green)':r.status==='error'?'var(--accent-red)':'var(--accent-orange)'}">${r.status||''} · ${r.discovered_count||0} 发现</span></div>`).join('') || '<div class="empty-hint">暂无运行记录</div>';
 }
 
+/* ===== 实验渲染 ===== */
+function renderExperiments(list) {
+  return list.map(e => `
+    <div class="exp-item">
+      <div style="display:flex;justify-content:space-between;cursor:pointer" onclick="this.parentElement.querySelector('.exp-detail').style.display = this.parentElement.querySelector('.exp-detail').style.display==='none'?'block':'none'">
+        <div>
+          <strong>${escapeHtml(e.project_name||e.project_slug||'未知')}</strong>
+          <span class="hint"> ${escapeHtml(e.node_id||'')} · ${new Date((e.created_at||0)*1000).toLocaleString()}</span>
+          <div class="hint">${escapeHtml((e.public_observation||'').slice(0,80))}</div>
+        </div>
+        <span class="exp-status ${e.status}">${e.status} ▾</span>
+      </div>
+      <div class="exp-detail">
+        ${renderEvidence(e.evidence)}
+      </div>
+    </div>`).join('');
+}
+function renderEvidence(ev) {
+  if (!Array.isArray(ev) || !ev.length) return '<div class="hint" style="padding:8px 0">无 evidence</div>';
+  return ev.map((item,i) => {
+    const target = item.target || item.url || item.host || ('条目 '+(i+1));
+    let rows = '';
+    if (item.technologies?.length) rows += `<div class="metric-row"><span class="k">技术栈</span><span class="v">${escapeHtml(item.technologies.map(t=>(t.name||'')+(t.version?' '+t.version:'')).join('，'))}</span></div>`;
+    if (item.vulnerabilities?.length) rows += `<div class="metric-row"><span class="k">漏洞</span><span class="v" style="text-align:right">${item.vulnerabilities.map(v=>`<span class="vuln-item">${escapeHtml(v.cve_id||v.id||v.name||'漏洞')}</span>`).join('<br>')}</span></div>`;
+    if (item.error) rows += `<div class="metric-row"><span class="k">错误</span><span class="v vuln-item">${escapeHtml(item.error)}</span></div>`;
+    return `<div class="evidence-box"><div class="ev-target">${escapeHtml(target)}</div>${rows||'<div class="hint">'+escapeHtml(JSON.stringify(item).slice(0,150))+'</div>'}</div>`;
+  }).join('');
+}
 
-  const input = document.getElementById('chat-input');
-  const msg = input.value.trim();
+/* ===== 对话 ===== */
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
   if (!msg) return;
-  const history = document.getElementById('chat-history');
-  history.innerHTML += `<div class="msg user">${escapeHtml(msg)}</div>`;
+  const h = document.getElementById('chat-history');
+  h.innerHTML += `<div class="msg user">${escapeHtml(msg)}</div>`;
   input.value = '';
   const r = await api('/api/chat', 'POST', {message: msg});
-  history.innerHTML += `<div class="msg bot">${escapeHtml(r.reply || r.error || '无响应')}</div>`;
-  history.scrollTop = history.scrollHeight;
+  h.innerHTML += `<div class="msg bot">${escapeHtml(r.reply || r.error || '无响应')}</div>`;
+  h.scrollTop = h.scrollHeight;
 }
 function quickChat(m) { document.getElementById('chat-input').value = m; sendChat(); }
-function escapeHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function searchOverview() {
+  const q = document.getElementById('overview-search').value.trim();
+  if (!q) return;
+  document.getElementById('scan-query').value = q;
+  switchView('scan');
 }
 
+/* ===== 初始化 ===== */
+loadOverview();
+loadAssets();
+loadLeaks();
 loadMonitor();
 loadAnalytics();
-loadExperiments();
-loadAssets();
 loadResearch();
-setInterval(loadMonitor, 5000);   // 5 秒刷新实时状态
-setInterval(loadAnalytics, 10000); // 10 秒刷新图表
-setInterval(loadExperiments, 15000); // 15 秒刷新实验结果
-setInterval(loadAssets, 20000);   // 20 秒刷新资产
-setInterval(loadResearch, 30000); // 30 秒刷新研究面板
+setInterval(loadMonitor, 5000);
+setInterval(loadOverview, 15000);
+setInterval(loadLeaks, 20000);
+setInterval(loadResearch, 30000);
 </script>
 </body>
 </html>
