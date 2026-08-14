@@ -1075,6 +1075,8 @@ def api_showcase():
                 "research_assets_total": sc.get("total_assets", 0),
                 "research_assets_analyzed": sc.get("analyzed_assets", 0),
                 "research_vuln_total": sc.get("vuln_total", 0),
+                "research_vuln_suspected": sc.get("vuln_suspected", 0),
+                "research_vuln_verified": sc.get("vuln_verified", 0),
                 "research_risk_critical_high": (sc.get("risk_buckets") or {}).get("CRITICAL", 0)
                     + (sc.get("risk_buckets") or {}).get("HIGH", 0),
                 "research_api_exposed": sc.get("api_exposed_assets", 0),
@@ -1173,6 +1175,8 @@ def api_showcase():
         summary["research_assets_total"] = sc_overview.get("total_assets", 0)
         summary["research_assets_analyzed"] = sc_overview.get("analyzed_assets", 0)
         summary["research_vuln_total"] = sc_overview.get("vuln_total", 0)
+        summary["research_vuln_suspected"] = sc_overview.get("vuln_suspected", 0)
+        summary["research_vuln_verified"] = sc_overview.get("vuln_verified", 0)
         summary["research_risk_critical_high"] = (sc_overview.get("risk_buckets") or {}).get("CRITICAL", 0) + \
             (sc_overview.get("risk_buckets") or {}).get("HIGH", 0)
         summary["research_api_exposed"] = sc_overview.get("api_exposed_assets", 0)
@@ -1696,6 +1700,10 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
     api_asset_count = 0
     risk_buckets = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     vuln_total = 0
+    # 口径拆分（Codex 建议）：疑似匹配 vs 已复验
+    vuln_suspected = 0
+    vuln_verified = 0
+    verified_assets = 0
 
     try:
         conn = db._connect()
@@ -1719,6 +1727,13 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
             risk_buckets[risk_level if risk_level in risk_buckets else "INFO"] += 1
             vulns = an.get("vulnerabilities") or []
             vuln_total += len(vulns)
+            vuln_suspected += len(vulns)
+            # 已复验口径：分析状态完成 + 主动探测证据（非仅 FoFa 字段匹配）
+            is_verified = row["analysis_status"] in ("analyzed", "completed") and (
+                an.get("api_endpoints") or an.get("technologies") or an.get("exposure_findings"))
+            if is_verified:
+                vuln_verified += len(vulns)
+                verified_assets += 1
             vuln_assets = {v.get("component") for v in vulns if v.get("component")}
             if vulns:
                 for v in vulns:
@@ -1756,6 +1771,9 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
         "total_assets": total_assets,
         "analyzed_assets": analyzed_assets,
         "vuln_total": vuln_total,
+        "vuln_suspected": vuln_suspected,
+        "vuln_verified": vuln_verified,
+        "verified_assets": verified_assets,
         "risk_buckets": risk_buckets,
         "api_exposure_rate": round(api_asset_count / analyzed_assets, 3) if analyzed_assets else 0,
         "api_exposed_assets": api_asset_count,
@@ -2128,6 +2146,7 @@ def api_lab_report():
                         "asset": item.get("target") or item.get("host", ""),
                         "component": v.get("component", ""),
                         "version": v.get("installed_version", ""),
+                        "cve_id": v.get("cve_id", ""),
                         "summary": f"{v.get('cve_id', '')} · {v.get('title', '')[:80]}",
                         "source": f"node-{node_id}",
                         "confidence": "medium",
