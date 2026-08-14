@@ -2005,6 +2005,21 @@ def api_brain_events():
     return jsonify({"total": len(events), "events": events})
 
 
+@app.route("/api/brain/vault", methods=["POST"])
+def api_brain_vault():
+    """生成 Obsidian 大脑记忆库（Brain Vault）：项目/泄露/经验/日志 → .md 笔记"""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    from core.brain_vault import generate_vault
+    vault_root = os.path.join(BASE_DIR, "data", "brain_vault")
+    result = generate_vault(scan_database, vault_root=vault_root)
+    scan_database.brain_event(event_type="result", action="Obsidian 记忆库生成",
+                              detail=f"项目 {result['stats']['projects']} · 泄露 {result['stats']['leaks']} · 经验 {result['stats']['experience']}",
+                              reason="大脑长期记忆落盘为 Obsidian vault",
+                              meta=result["stats"])
+    return jsonify(result)
+
+
 @app.route("/api/threat-intel/sync", methods=["POST"])
 def api_threat_intel_sync():
     """手动同步 CISA KEV 攻击情报（Issue #10 目标 3）"""
