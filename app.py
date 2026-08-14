@@ -181,6 +181,10 @@ tasks: Dict[str, Dict[str, Any]] = {}
 tasks_lock = threading.Lock()
 scan_database = ScanDatabase(Config.DATABASE_PATH)
 
+# 注入数据库到告警模块（outbox 持久化）
+from core.notifier import set_database, flush_outbox
+set_database(scan_database)
+
 # 全局核心模块实例（避免每次分析重复加载签名/漏洞数据库）
 tech_detector = TechDetector()
 supply_chain_mapper = SupplyChainMapper()
@@ -398,6 +402,13 @@ def analyze_asset(asset: Asset, scan_api: bool, online_query: bool,
 
     # 步骤 3：漏洞检查
     vulnerabilities = vuln_checker.check(technologies)
+    # 漏洞级验证语义（Codex P0-2）：研究大脑做了主动 HTTP 探测 + 指纹命中 → condition_matched
+    if scan_api:
+        for v in vulnerabilities:
+            if getattr(v, "verification_status", "suspected") == "suspected":
+                v.verification_status = "condition_matched"
+                v.verification_method = "active_http_probe_fingerprint"
+                v.verified_at = time.time()
 
     # 步骤 4：利用方式查找
     exploits = exploit_finder.find(vulnerabilities)
@@ -493,6 +504,21 @@ def probe_research_project(project_slug: str, asset_data: Dict[str, Any]) -> Dic
 research_brain = ResearchBrain(scan_database, Config, analyze_research_candidate,
                                probe_research_project)
 research_brain.start()
+
+
+def _alert_outbox_worker():
+    """后台线程：定时重试待投递告警（失败重试，Codex P1）"""
+    while True:
+        try:
+            flush_outbox(webhook_url=Config.ALERT_WEBHOOK_URL,
+                         bot_token=Config.ALERT_TELEGRAM_TOKEN,
+                         chat_id=Config.ALERT_TELEGRAM_CHAT_ID)
+        except Exception as exc:
+            logger.warning("告警 outbox 重试失败: %s", exc)
+        time.sleep(60)
+
+
+threading.Thread(target=_alert_outbox_worker, daemon=True).start()
 
 # 大脑端任务分发器：向执行引擎（worker 节点）下发任务并回收结果
 task_dispatcher = TaskDispatcher(scan_database, Config)
@@ -1076,6 +1102,7 @@ def api_showcase():
                 "research_assets_analyzed": sc.get("analyzed_assets", 0),
                 "research_vuln_total": sc.get("vuln_total", 0),
                 "research_vuln_suspected": sc.get("vuln_suspected", 0),
+                "research_vuln_condition_matched": sc.get("vuln_condition_matched", 0),
                 "research_vuln_verified": sc.get("vuln_verified", 0),
                 "research_risk_critical_high": (sc.get("risk_buckets") or {}).get("CRITICAL", 0)
                     + (sc.get("risk_buckets") or {}).get("HIGH", 0),
@@ -1176,6 +1203,7 @@ def api_showcase():
         summary["research_assets_analyzed"] = sc_overview.get("analyzed_assets", 0)
         summary["research_vuln_total"] = sc_overview.get("vuln_total", 0)
         summary["research_vuln_suspected"] = sc_overview.get("vuln_suspected", 0)
+        summary["research_vuln_condition_matched"] = sc_overview.get("vuln_condition_matched", 0)
         summary["research_vuln_verified"] = sc_overview.get("vuln_verified", 0)
         summary["research_risk_critical_high"] = (sc_overview.get("risk_buckets") or {}).get("CRITICAL", 0) + \
             (sc_overview.get("risk_buckets") or {}).get("HIGH", 0)
@@ -1700,8 +1728,9 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
     api_asset_count = 0
     risk_buckets = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
     vuln_total = 0
-    # 口径拆分（Codex 建议）：疑似匹配 vs 已复验
+    # 口径拆分（Codex P0-2，漏洞级）：suspected / condition_matched / actively_verified
     vuln_suspected = 0
+    vuln_condition_matched = 0
     vuln_verified = 0
     verified_assets = 0
 
@@ -1727,12 +1756,18 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
             risk_buckets[risk_level if risk_level in risk_buckets else "INFO"] += 1
             vulns = an.get("vulnerabilities") or []
             vuln_total += len(vulns)
-            vuln_suspected += len(vulns)
-            # 已复验口径：分析状态完成 + 主动探测证据（非仅 FoFa 字段匹配）
-            is_verified = row["analysis_status"] in ("analyzed", "completed") and (
-                an.get("api_endpoints") or an.get("technologies") or an.get("exposure_findings"))
-            if is_verified:
-                vuln_verified += len(vulns)
+            # 漏洞级 verification 统计：只聚合明确 verified；condition_matched 单独口径
+            has_verified = False
+            for v in vulns:
+                vs = (v.get("verification_status") or "suspected").lower()
+                if vs == "actively_verified":
+                    vuln_verified += 1
+                    has_verified = True
+                elif vs == "condition_matched":
+                    vuln_condition_matched += 1
+                else:
+                    vuln_suspected += 1
+            if has_verified:
                 verified_assets += 1
             vuln_assets = {v.get("component") for v in vulns if v.get("component")}
             if vulns:
@@ -1772,6 +1807,7 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
         "analyzed_assets": analyzed_assets,
         "vuln_total": vuln_total,
         "vuln_suspected": vuln_suspected,
+        "vuln_condition_matched": vuln_condition_matched,
         "vuln_verified": vuln_verified,
         "verified_assets": verified_assets,
         "risk_buckets": risk_buckets,
@@ -1889,16 +1925,31 @@ def api_analysis_project():
 
 @app.route("/api/leaks")
 def api_leaks():
-    """凭据泄露查询（专属数据表 credential_leaks）"""
+    """凭据泄露查询（专属数据表 credential_leaks）
+
+    ?full=1 需 X-Lab-Token 管理员授权，且记录审计日志（谁/何时/哪条）。
+    默认仅返回 masked key（api_key_full 不在结果中）。
+    """
     limit = min(int(request.args.get("limit", "100")), 500)
     status = request.args.get("status", "")
     target = request.args.get("target", "")
-    leaks = scan_database.list_credential_leaks(limit=limit, status=status, target=target)
-    # 默认不返回完整 key（前端展示用 masked）
     full = request.args.get("full") == "1"
-    if not full:
-        for l in leaks:
-            l.pop("api_key_full", None)
+    authorized = bool(Config.LAB_REPORT_TOKEN) and request.headers.get("X-Lab-Token") == Config.LAB_REPORT_TOKEN
+    if full and not authorized:
+        return jsonify({"error": "unauthorized: full key 需要 X-Lab-Token"}), 401
+    leaks = scan_database.list_credential_leaks(
+        limit=limit, status=status, target=target, include_full=(full and authorized))
+    if full and authorized:
+        # 审计日志：完整密钥读取记录（Codex P0-1）
+        audit_line = {
+            "time": time.time(), "ip": request.remote_addr or "",
+            "target": target or "*", "count": len(leaks),
+        }
+        try:
+            with open(os.path.join(BASE_DIR, "data", "leak_audit.log"), "a") as af:
+                af.write(json.dumps(audit_line, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("凭据审计日志写入失败: %s", exc)
     return jsonify({"total": len(leaks), "leaks": leaks})
 
 
