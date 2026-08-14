@@ -48,6 +48,10 @@ class Vulnerability:
     exploit_difficulty: str = ""
     references: List[str] = None
     source: str = "local"  # local, nvd, osv
+    # 漏洞级验证状态（Codex P0-2）：suspected / condition_matched / actively_verified / excluded
+    verification_status: str = "suspected"
+    verification_method: str = ""
+    verified_at: float = 0.0
 
     def __post_init__(self):
         """初始化后处理：确保 references 是列表"""
@@ -69,6 +73,9 @@ class Vulnerability:
             "exploit_difficulty": self.exploit_difficulty,
             "references": self.references,
             "source": self.source,
+            "verification_status": self.verification_status,
+            "verification_method": self.verification_method,
+            "verified_at": self.verified_at,
         }
 
 
