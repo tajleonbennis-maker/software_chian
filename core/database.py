@@ -580,6 +580,14 @@ class ScanDatabase:
                      experiment.get("remediation", ""), experiment.get("conclusion_boundary",
                      "靶场复现不等同于第三方公网实例已被利用。"), now, now))
 
+    def node_recent_activity(self, node_id: str, window_seconds: int = 180) -> int:
+        """节点最近 window_seconds 秒内的实验任务数（用于忙碌检测）"""
+        cutoff = time.time() - window_seconds
+        with self._connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) c FROM lab_experiments WHERE node_id=? AND created_at>=?",
+                (node_id, cutoff)).fetchone()["c"]
+
     def lab_overview(self) -> Dict[str, Any]:
         with self._connect() as db:
             nodes = [dict(row) for row in db.execute("SELECT * FROM lab_nodes ORDER BY last_heartbeat DESC").fetchall()]
