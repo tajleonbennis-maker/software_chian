@@ -1662,6 +1662,18 @@ def api_asset_detail():
             detail["risk_level"] = "MEDIUM"
         elif detail.get("exposure_findings") or detail.get("sensitive_hits") or detail.get("credential_leaks"):
             detail["risk_level"] = "LOW"
+
+    # 置信度推导（Grok 建议：指纹多特征命中=高；仅 title/URL 模糊=低）
+    conf = "low"
+    if detail.get("vulnerabilities") or detail.get("technologies"):
+        conf = "high"
+    elif detail.get("api_endpoints") or detail.get("exposure_findings") or detail.get("credential_leaks"):
+        conf = "medium"
+    elif detail.get("asset"):
+        conf = "low"
+    detail["confidence"] = conf
+    # 数据来源标签：FOFA / 主动探测 / 实验
+    detail["data_source"] = "FOFA" if detail.get("source") == "database" else "主动探测"
     return jsonify(detail)
 
 
@@ -1751,6 +1763,110 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
         "top_components": top_component_list,
         "avg_components": round(sum(component_counter.values()) / analyzed_assets, 2) if analyzed_assets else 0,
     }
+
+
+@app.route("/api/analysis/project")
+def api_analysis_project():
+    """热门组件专项分析（Dify 样板间）：版本分布 / 高危标记 / FOFA 语法 / 复验状态
+
+    ?slug=dify 项目 slug（默认 dify）
+    数据来源：research_assets（该项目的已分析资产）
+    """
+    from core.database import ScanDatabase
+    from core.research_brain import SEED_PROJECTS
+
+    slug = (request.args.get("slug") or "dify").strip().lower()
+    db = ScanDatabase(Config.DATABASE_PATH)
+
+    # 项目元信息（FOFA 语法来自种子配置）
+    project_meta = next((p for p in SEED_PROJECTS if p.get("slug", "").lower() == slug), {})
+    fofa_query = project_meta.get("discovery_query", "")
+    name = project_meta.get("name", slug)
+
+    total = 0
+    analyzed = 0
+    version_counter = {}
+    component_counter = {}
+    vuln_assets = []
+    api_exposed = 0
+    critical_hits = 0
+    high_hits = 0
+    verified = 0
+
+    try:
+        conn = db._connect()
+        rows = conn.execute(
+            "SELECT asset_json, analysis_json, analysis_status, analyzed_at "
+            "FROM research_assets WHERE project_slug=?",
+            (slug,)).fetchall()
+        conn.close()
+        total = len(rows)
+        for row in rows:
+            if not row["analysis_json"]:
+                continue
+            try:
+                an = json.loads(row["analysis_json"])
+            except Exception:
+                continue
+            analyzed += 1
+            asset = json.loads(row["asset_json"]) if row["asset_json"] else {}
+            vulns = an.get("vulnerabilities") or []
+            techs = an.get("technologies") or []
+            # 版本分布：尝试从 title/header/tech 提取组件版本
+            for t in techs:
+                tn = t.get("name", "")
+                tv = t.get("version", "")
+                component_counter[tn] = component_counter.get(tn, 0) + 1
+                if tv:
+                    key = f"{tn} {tv}"
+                    version_counter[key] = version_counter.get(key, 0) + 1
+            for v in vulns:
+                sev = (v.get("severity") or "").upper()
+                if sev == "CRITICAL":
+                    critical_hits += 1
+                elif sev == "HIGH":
+                    high_hits += 1
+                if sev in ("CRITICAL", "HIGH"):
+                    vuln_assets.append({
+                        "host": asset.get("host") or asset.get("ip") or "",
+                        "cve": v.get("cve_id") or v.get("id", ""),
+                        "severity": sev,
+                        "component": v.get("component", ""),
+                        "analyzed_at": row["analyzed_at"] or 0,
+                    })
+            if an.get("api_endpoints"):
+                api_exposed += 1
+            # 复验状态：analysis_status completed + 有实际分析输出
+            if row["analysis_status"] in ("completed", "analyzed"):
+                verified += 1
+    except Exception as exc:
+        logger.warning("项目专项分析失败: %s", exc)
+
+    # 高风险 CVE 去重汇总
+    cve_summary = {}
+    for va in vuln_assets:
+        c = va["cve"]
+        if c not in cve_summary:
+            cve_summary[c] = {"cve": c, "count": 0, "severity": va["severity"],
+                              "component": va["component"]}
+        cve_summary[c]["count"] += 1
+    top_cves = sorted(cve_summary.values(), key=lambda x: -x["count"])[:10]
+
+    return jsonify({
+        "slug": slug,
+        "name": name,
+        "fofa_query": fofa_query,
+        "total_assets": total,
+        "analyzed_assets": analyzed,
+        "version_distribution": sorted(version_counter.items(), key=lambda kv: -kv[1])[:15],
+        "component_distribution": sorted(component_counter.items(), key=lambda kv: -kv[1])[:15],
+        "critical_hits": critical_hits,
+        "high_hits": high_hits,
+        "api_exposed_assets": api_exposed,
+        "verified_assets": verified,
+        "vuln_assets": vuln_assets[:50],
+        "top_cves": top_cves,
+    })
 
 
 @app.route("/api/leaks")
@@ -1965,6 +2081,64 @@ def api_lab_report():
                 leak_count += 1
     if leak_count:
         logger.info("lab report: 新增 %d 条凭据泄露记录", leak_count)
+    # ---- 告警推送：新 SK 泄露 ----
+    if leak_count and Config.ALERT_NOTIFY_LEAKS:
+        try:
+            from core.notifier import notify
+            for experiment in report.get("experiments", []):
+                for item in experiment.get("evidence", []):
+                    secrets = item.get("secrets", []) if isinstance(item, dict) else []
+                    for s in secrets:
+                        key_full = s.get("api_key", "")
+                        if not key_full:
+                            continue
+                        alert = {
+                            "type": "SK 泄露",
+                            "severity": "CRITICAL",
+                            "asset": s.get("source_url") or item.get("target", ""),
+                            "component": s.get("provider", "unknown"),
+                            "version": s.get("base_url", ""),
+                            "summary": "发现公开可达的 LLM API Key",
+                            "source": f"node-{node_id}",
+                            "confidence": "high",
+                            "api_key": key_full,
+                            "link": f"https://www.cyberstroll.cn/sc/dashboard#leaks",
+                        }
+                        notify(alert,
+                               webhook_url=Config.ALERT_WEBHOOK_URL,
+                               bot_token=Config.ALERT_TELEGRAM_TOKEN,
+                               chat_id=Config.ALERT_TELEGRAM_CHAT_ID)
+        except Exception as exc:
+            logger.warning("SK 告警推送失败: %s", exc)
+
+    # ---- 告警推送：CRITICAL 漏洞资产 ----
+    try:
+        from core.notifier import notify
+        min_level = (Config.ALERT_MIN_LEVEL or "CRITICAL").upper()
+        for experiment in report.get("experiments", []):
+            for item in experiment.get("evidence", []):
+                vulns = item.get("vulnerabilities") or []
+                for v in vulns:
+                    sev = (v.get("severity") or "").upper()
+                    if sev != "CRITICAL":
+                        continue
+                    alert = {
+                        "type": "CRITICAL 漏洞",
+                        "severity": "CRITICAL",
+                        "asset": item.get("target") or item.get("host", ""),
+                        "component": v.get("component", ""),
+                        "version": v.get("installed_version", ""),
+                        "summary": f"{v.get('cve_id', '')} · {v.get('title', '')[:80]}",
+                        "source": f"node-{node_id}",
+                        "confidence": "medium",
+                        "link": f"https://www.cyberstroll.cn/sc/dashboard#assets",
+                    }
+                    notify(alert,
+                           webhook_url=Config.ALERT_WEBHOOK_URL,
+                           bot_token=Config.ALERT_TELEGRAM_TOKEN,
+                           chat_id=Config.ALERT_TELEGRAM_CHAT_ID)
+    except Exception as exc:
+        logger.warning("CRITICAL 告警推送失败: %s", exc)
 
     return jsonify({"ok": True, "leaks_ingested": leak_count})
 
