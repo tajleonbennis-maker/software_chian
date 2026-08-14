@@ -471,9 +471,11 @@ const VIEWS = ['overview','scan','assets','leaks','brain'];
 async function api(path, method='GET', body=null) {
   const headers = {'Content-Type': 'application/json'};
   if (TOKEN) headers['X-Lab-Token'] = TOKEN;
+  // 通过 nginx 反代访问时（/sc/ 前缀），API 请求也带上前缀，走同一后端
+  const base = window.location.pathname.startsWith('/sc/') ? '/sc' : '';
   const opts = {method, headers};
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(path, opts);
+  const r = await fetch(base + path, opts);
   return r.json();
 }
 function escapeHtml(s) {
