@@ -418,6 +418,21 @@ a:hover { text-decoration: underline; }
         <div class="card-header"><h3>热门 GitHub 项目部署</h3><span class="hint" id="research-status"></span></div>
         <div id="project-deploy"><div class="empty-hint">加载中...</div></div>
       </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="card-header">
+          <h3>🎯 Dify 专项分析</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="proj-select" onchange="loadProjectAnalysis()" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;">
+              <option value="dify">Dify</option>
+              <option value="open-webui">Open WebUI</option>
+              <option value="deeptutor">DeepTutor</option>
+              <option value="anythingllm">AnythingLLM</option>
+            </select>
+            <button class="btn-secondary" onclick="loadProjectAnalysis()">刷新</button>
+          </div>
+        </div>
+        <div id="project-analysis"><div class="empty-hint">加载中...</div></div>
+      </div>
       <div class="chart-card"><h3>FoFa 热搜组件</h3><div id="fofa-hot"><div class="empty-hint">加载中...</div></div></div>
       <div class="chart-card"><h3>趋势信号</h3><div id="trend-signals"><div class="empty-hint">加载中...</div></div></div>
       <div class="chart-card"><h3>研究运行记录</h3><div id="research-runs"><div class="empty-hint">加载中...</div></div></div>
@@ -642,6 +657,8 @@ async function openAssetDetail(host) {
     if (d.vuln_count) meta.push('漏洞 ' + d.vuln_count);
     if (d.tech_count) meta.push('组件 ' + d.tech_count);
     if (d.project_slug) meta.push('项目 ' + d.project_slug);
+    if (d.data_source) meta.push('来源 ' + d.data_source);
+    if (d.confidence) meta.push('置信度 ' + d.confidence);
     if (d.analyzed_at) meta.push('分析于 ' + new Date(d.analyzed_at*1000).toLocaleString());
     metaEl.textContent = meta.join(' · ');
     // 渲染各面板
@@ -839,6 +856,50 @@ async function loadResearch() {
     <div class="metric-row"><span class="k">${escapeHtml(r.project_name||'')}</span><span class="v" style="color:${r.status==='completed'?'var(--accent-green)':r.status==='error'?'var(--accent-red)':'var(--accent-orange)'}">${r.status||''} · ${r.discovered_count||0} 发现</span></div>`).join('') || '<div class="empty-hint">暂无运行记录</div>';
 }
 
+/* ===== 项目专项分析（Dify 样板间）===== */
+async function loadProjectAnalysis() {
+  const slug = document.getElementById('proj-select')?.value || 'dify';
+  const el = document.getElementById('project-analysis');
+  el.innerHTML = '<div class="empty-hint">加载中...</div>';
+  try {
+    const d = await api('/api/analysis/project?slug=' + encodeURIComponent(slug));
+    const vs = d.version_distribution || [];
+    const cs = d.component_distribution || [];
+    const riskColor = d.critical_hits ? 'var(--accent-red)' : d.high_hits ? 'var(--accent-orange)' : 'var(--accent-green)';
+    el.innerHTML = `
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+        <div class="kpi-card" style="flex:1;min-width:120px"><div class="label">总资产</div><div class="value blue">${d.total_assets||0}</div></div>
+        <div class="kpi-card" style="flex:1;min-width:120px"><div class="label">已分析</div><div class="value">${d.analyzed_assets||0}</div></div>
+        <div class="kpi-card" style="flex:1;min-width:120px"><div class="label">CRITICAL 命中</div><div class="value" style="color:${riskColor}">${d.critical_hits||0}</div></div>
+        <div class="kpi-card" style="flex:1;min-width:120px"><div class="label">HIGH 命中</div><div class="value orange">${d.high_hits||0}</div></div>
+        <div class="kpi-card" style="flex:1;min-width:120px"><div class="label">API 暴露</div><div class="value">${d.api_exposed_assets||0}</div></div>
+        <div class="kpi-card" style="flex:1;min-width:120px"><div class="label">已复验</div><div class="value green">${d.verified_assets||0}</div></div>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div class="hint" style="margin-bottom:6px">版本分布 Top10</div>
+          ${vs.slice(0,10).map(([k,v]) => `<div class="metric-row"><span class="k mono">${escapeHtml(k)}</span><span class="v">${v} 例</span></div>`).join('') || '<div class="hint">暂无版本数据</div>'}
+        </div>
+        <div style="flex:1;min-width:220px">
+          <div class="hint" style="margin-bottom:6px">组件分布 Top10</div>
+          ${cs.slice(0,10).map(([k,v]) => `<div class="metric-row"><span class="k">${escapeHtml(k)}</span><span class="v">${v} 例</span></div>`).join('') || '<div class="hint">暂无组件数据</div>'}
+        </div>
+        <div style="flex:1;min-width:260px">
+          <div class="hint" style="margin-bottom:6px">高危 CVE Top</div>
+          ${(d.top_cves||[]).slice(0,8).map(c => `<div class="metric-row"><span class="k" style="color:${c.severity==='CRITICAL'?'var(--accent-red)':'var(--accent-orange)'}">${escapeHtml(c.cve)}</span><span class="v">${c.count} 资产</span></div>`).join('') || '<div class="hint">无高危 CVE</div>'}
+        </div>
+      </div>
+      ${d.fofa_query ? `<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="hint">FOFA 语法：</span>
+        <code class="mono" style="background:var(--bg-tertiary);padding:4px 8px;border-radius:4px;border:1px solid var(--border)">${escapeHtml(d.fofa_query)}</code>
+        <button class="btn-secondary" onclick="navigator.clipboard.writeText('${escapeHtml(d.fofa_query)}')">复制</button>
+        <button class="btn-secondary" onclick="setSearch('${escapeHtml(d.fofa_query)}')">🔎 在扫描页使用</button>
+      </div>` : ''}`;
+  } catch(e) {
+    el.innerHTML = '<div class="empty-hint">加载失败: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
 /* ===== 实验渲染 ===== */
 function renderExperiments(list) {
   return list.map(e => `
@@ -895,10 +956,12 @@ loadLeaks();
 loadMonitor();
 loadAnalytics();
 loadResearch();
+loadProjectAnalysis();
 setInterval(loadMonitor, 5000);
 setInterval(loadOverview, 15000);
 setInterval(loadLeaks, 20000);
 setInterval(loadResearch, 30000);
+setInterval(loadProjectAnalysis, 60000);
 </script>
 </body>
 </html>
