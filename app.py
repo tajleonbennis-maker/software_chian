@@ -1819,6 +1819,143 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
     }
 
 
+# ============================================================
+# 研判卡（decision cards）：判断与克制（Codex 方向评审）
+# ============================================================
+def generate_decision_cards() -> int:
+    """从研究资产生成研判卡：按 topic（组件/项目）聚合，确定性打分排序。
+
+    返回本次新增卡数。证据不足的 topic 生成弃权卡（insufficient）。
+    """
+    from core.analyst import build_card
+    from core.database import ScanDatabase
+
+    db = ScanDatabase(Config.DATABASE_PATH)
+    cards_created = 0
+
+    # 1. 组件级研判卡：聚合 supply-chain 数据的 top_risk_components + top_components
+    try:
+        sc = api_supply_chain_overview_data()
+        now = time.time()
+        for comp in (sc.get("top_risk_components") or [])[:15]:
+            sev = "CRITICAL" if comp.get("critical") else "HIGH"
+            card = build_card(
+                comp.get("component", ""),
+                severity=sev,
+                evidence_level=2,                      # L2 版本+漏洞条件匹配
+                asset_count=comp.get("vuln_count", 0),
+                is_new=False,
+                has_api=False,
+                source="supply-chain",
+                fofa_query=f'header="{comp.get("component")}" || app="{comp.get("component")}"',
+                change_text=f"{comp.get('component')} 关联 {comp.get('vuln_count', 0)} 个漏洞观测",
+                why_worth="高频组件 + 已知漏洞，值得确认是否命中受影响版本",
+                evidence_says=f"在资产库中检测到 {comp.get('vuln_count', 0)} 条漏洞记录（组件维度）",
+                evidence_limits="版本区间匹配（L2），未经授权验证不能确认可利用",
+                next_step="打开资产库筛选该组件 → 复核版本 → 确认是否命中受影响区间",
+                abort_condition="版本均不在受影响区间，或样本全部消失",
+                card_type="component",
+            )
+            if db.card_insert(card):
+                cards_created += 1
+    except Exception as exc:
+        logger.warning("生成组件研判卡失败: %s", exc)
+
+    # 2. 项目级研判卡：从 research_overview 的资产/分析情况
+    try:
+        overview = scan_database.research_overview()
+        for p in (overview.get("projects") or []):
+            ac = p.get("asset_count") or 0
+            if ac <= 0:
+                continue
+            sev = "HIGH" if (p.get("analyzed_count") or 0) >= 20 else "MEDIUM"
+            card = build_card(
+                p.get("name") or p.get("slug", ""),
+                severity=sev,
+                evidence_level=1,
+                asset_count=ac,
+                is_new=True,
+                has_api=False,
+                source="research",
+                fofa_query=f'title="{p.get("name", "")}"',
+                change_text=f"{p.get('name')} 观测到 {ac} 个公网部署资产",
+                why_worth=f"{p.get('category', '')} 热门项目，公网暴露面较大，值得抽样复核",
+                evidence_says=f"测绘观测 {ac} 资产，已分析 {p.get('analyzed_count', 0)}",
+                evidence_limits="L1 指纹观测，未逐资产授权验证",
+                next_step=f"查看 {p.get('name')} 专项分析 → 抽样确认 → 决定继续关注或放弃",
+                abort_condition="样本无新变化连续多日，或确认均为正常部署",
+                card_type="project",
+            )
+            if db.card_insert(card):
+                cards_created += 1
+    except Exception as exc:
+        logger.warning("生成项目研判卡失败: %s", exc)
+
+    # 3. 热搜变化研判卡：新出现的 trend-* 项目
+    try:
+        overview = scan_database.research_overview()
+        signals = (overview.get("intelligence") or {}).get("signals", []) or []
+        for s in signals[:20]:
+            name = s.get("name", "")
+            if not name or s.get("status") not in ("promoted", "new"):
+                continue
+            card = build_card(
+                f"热搜:{name}",
+                severity="MEDIUM",
+                evidence_level=0,
+                asset_count=0,
+                is_new=True,
+                has_api=False,
+                source="fofa-trend",
+                fofa_query=f'"{name}"',
+                change_text=f"{name} 进入 FoFa 热搜（momentum={s.get('momentum', '?')}）",
+                why_worth="热搜上升通常伴随注意力/风险集中，值得先快速看一眼",
+                evidence_says="FoFa 热搜信号（L0 观测）",
+                evidence_limits="仅热度信号，无资产级证据",
+                next_step="用 FOFA 语法快速抽查公开部署 → 有信号则转正式研判卡",
+                abort_condition="抽查无异常部署，热度回落",
+                card_type="trend",
+            )
+            if db.card_insert(card):
+                cards_created += 1
+    except Exception as exc:
+        logger.warning("生成热搜研判卡失败: %s", exc)
+
+    logger.info("研判卡生成完成：新增 %d 张", cards_created)
+    return cards_created
+
+
+@app.route("/api/cards", methods=["GET"])
+def api_cards():
+    """研判卡列表（pending 优先，按评分降序）。?decision= / ?topic= / ?limit= """
+    limit = min(int(request.args.get("limit", "50")), 200)
+    decision = request.args.get("decision", "")
+    topic = request.args.get("topic", "")
+    cards = scan_database.card_list(limit=limit, decision=decision, topic=topic)
+    return jsonify({"total": len(cards), "cards": cards, "stats": scan_database.card_stats()})
+
+
+@app.route("/api/cards/generate", methods=["POST"])
+def api_cards_generate():
+    """手动触发研判卡生成。Body: {"token": "..."} 或 X-Lab-Token 头"""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    n = generate_decision_cards()
+    return jsonify({"ok": True, "created": n, "stats": scan_database.card_stats()})
+
+
+@app.route("/api/cards/<card_id>/decide", methods=["POST"])
+def api_cards_decide(card_id):
+    """反馈标记：worth（值得研究）/ noise（噪音）/ insufficient（证据不足）/ done（已处理）"""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    decision = (body.get("decision") or "").strip()
+    if scan_database.card_decide(card_id, decision):
+        return jsonify({"ok": True, "decision": decision})
+    return jsonify({"error": "decision 必须是 worth/noise/insufficient/done"}), 400
+
+
 @app.route("/api/analysis/project")
 def api_analysis_project():
     """热门组件专项分析（Dify 样板间）：版本分布 / 高危标记 / FOFA 语法 / 复验状态
