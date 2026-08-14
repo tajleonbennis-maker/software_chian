@@ -260,8 +260,8 @@ class ResearchBrain:
             new_count = self.database.upsert_research_assets(project["slug"], public_assets)
             self.database.finish_research_run(run_id, project["slug"], "completed",
                                               len(public_assets), new_count, next_run_at=next_run)
-            self.database.brain_event("result", "发现完成", f"{project['name']} 发现 {len(public_assets)} 资产",
-                                      detail=f"新增 {new_count} · 复用存量", project=project["slug"],
+            self.database.brain_event("result", "发现完成", f"{project['name']} 发现 {len(public_assets)} 资产 · 新增 {new_count}",
+                                      project=project["slug"],
                                       meta={"discovered": len(public_assets), "new": new_count})
             logger.info("发现轮次完成: %s discovered=%d new=%d",
                         project["name"], len(public_assets), new_count)
