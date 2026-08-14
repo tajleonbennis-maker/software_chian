@@ -210,7 +210,7 @@
             ? `共 <strong>${base.research_assets_total}</strong> 条研究资产`
             : `共 <strong>${base.total_assets || 0}</strong> 条资产`;
         const vulnText = base.research_vuln_total > 0
-            ? `<strong>${base.research_vuln_total}</strong> 漏洞（高危 ${base.research_risk_critical_high || 0} · 已复验 ${base.research_vuln_verified || 0}）`
+            ? `<strong>${base.research_vuln_total}</strong> 漏洞命中（高危 ${base.research_risk_critical_high || 0} · 条件 ${base.research_vuln_condition_matched || 0} · 复验 ${base.research_vuln_verified || 0}）`
             : `<strong>${base.total_vulnerabilities || 0}</strong> 个漏洞`;
         els.publicSummary.innerHTML = `
             <span>${assetText} · 已分析 <strong>${base.research_assets_analyzed || 0}</strong></span>
