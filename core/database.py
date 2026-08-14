@@ -141,6 +141,33 @@ class ScanDatabase:
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_outbox_key ON alert_outbox(dedup_key)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_outbox_status ON alert_outbox(status)")
+            db.execute("""CREATE TABLE IF NOT EXISTS decision_cards (
+                card_id TEXT PRIMARY KEY,
+                topic TEXT NOT NULL,
+                card_type TEXT NOT NULL DEFAULT 'component',
+                change_text TEXT NOT NULL DEFAULT '',
+                why_worth TEXT NOT NULL DEFAULT '',
+                evidence_says TEXT NOT NULL DEFAULT '',
+                evidence_limits TEXT NOT NULL DEFAULT '',
+                next_step TEXT NOT NULL DEFAULT '',
+                abort_condition TEXT NOT NULL DEFAULT '',
+                evidence_level INTEGER NOT NULL DEFAULT 0,
+                severity TEXT NOT NULL DEFAULT 'MEDIUM',
+                confidence TEXT NOT NULL DEFAULT 'medium',
+                source TEXT NOT NULL DEFAULT '',
+                fofa_query TEXT NOT NULL DEFAULT '',
+                asset_count INTEGER NOT NULL DEFAULT 0,
+                dedup_key TEXT NOT NULL DEFAULT '',
+                decision TEXT NOT NULL DEFAULT 'pending',
+                score REAL NOT NULL DEFAULT 0,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                decided_at REAL,
+                payload_json TEXT
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_cards_topic ON decision_cards(topic)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_cards_decision ON decision_cards(decision)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_cards_dedup ON decision_cards(dedup_key)")
             asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
             for name, definition in (
                 ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -650,6 +677,87 @@ class ScanDatabase:
             return True
         except Exception:
             return False
+
+    # ============================================================
+    # 研判卡 decision_cards（Codex：判断与克制 / 反馈闭环）
+    # ============================================================
+    def card_insert(self, card: Dict[str, Any]) -> bool:
+        """插入研判卡（按 dedup_key 幂等）。返回是否新插入。"""
+        now = time.time()
+        card_id = card.get("card_id") or hashlib.md5(
+            (card.get("dedup_key") or "").encode()).hexdigest()
+        dedup_key = card.get("dedup_key") or card_id
+        with self._lock, self._connect() as db:
+            existing = db.execute(
+                "SELECT card_id FROM decision_cards WHERE dedup_key=?", (dedup_key,)).fetchone()
+            if existing:
+                # 更新观测（评分/资产数/时间变化）
+                db.execute("""UPDATE decision_cards SET last_seen=?, asset_count=?, score=?, 
+                    change_text=?, evidence_level=?, severity=?, confidence=?
+                    WHERE card_id=?""",
+                    (now, card.get("asset_count", 0), card.get("score", 0),
+                     card.get("change_text", ""), card.get("evidence_level", 0),
+                     card.get("severity", "MEDIUM"), card.get("confidence", "medium"),
+                     existing["card_id"]))
+                return False
+            db.execute("""INSERT INTO decision_cards
+                (card_id, topic, card_type, change_text, why_worth, evidence_says, evidence_limits,
+                 next_step, abort_condition, evidence_level, severity, confidence, source,
+                 fofa_query, asset_count, dedup_key, decision, score, first_seen, last_seen, payload_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (card_id, card.get("topic", ""), card.get("card_type", "component"),
+                 card.get("change_text", ""), card.get("why_worth", ""),
+                 card.get("evidence_says", ""), card.get("evidence_limits", ""),
+                 card.get("next_step", ""), card.get("abort_condition", ""),
+                 card.get("evidence_level", 0), card.get("severity", "MEDIUM"),
+                 card.get("confidence", "medium"), card.get("source", ""),
+                 card.get("fofa_query", ""), card.get("asset_count", 0),
+                 dedup_key, card.get("decision", "pending"), card.get("score", 0),
+                 now, now, json.dumps(card.get("payload", {}), ensure_ascii=False)))
+        return True
+
+    def card_list(self, limit: int = 100, decision: str = "", topic: str = "") -> List[Dict[str, Any]]:
+        """查询研判卡（默认 pending 优先、按评分降序）"""
+        sql = "SELECT * FROM decision_cards WHERE 1=1"
+        params: list = []
+        if decision:
+            sql += " AND decision=?"
+            params.append(decision)
+        if topic:
+            sql += " AND topic LIKE ?"
+            params.append("%" + topic + "%")
+        sql += " ORDER BY (decision='pending') DESC, score DESC, last_seen DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d.pop("payload_json") or "{}")
+            except Exception:
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    def card_decide(self, card_id: str, decision: str) -> bool:
+        """标记研判卡：值得研究 / 噪音 / 证据不足 / 已处理"""
+        allowed = ("worth", "noise", "insufficient", "done")
+        if decision not in allowed:
+            return False
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE decision_cards SET decision=?, decided_at=? WHERE card_id=?",
+                       (decision, time.time(), card_id))
+        return True
+
+    def card_stats(self) -> Dict[str, Any]:
+        """研判卡统计（用于反馈闭环评估）"""
+        with self._connect() as db:
+            total = db.execute("SELECT COUNT(*) c FROM decision_cards").fetchone()["c"]
+            by_decision = dict(db.execute(
+                "SELECT decision, COUNT(*) c FROM decision_cards GROUP BY decision").fetchall())
+            pending = db.execute("SELECT COUNT(*) c FROM decision_cards WHERE decision='pending'").fetchone()["c"]
+        return {"total": total, "pending": pending, "by_decision": by_decision}
 
     @staticmethod
     def _row_to_dict(row, include_results: bool) -> Dict[str, Any]:
