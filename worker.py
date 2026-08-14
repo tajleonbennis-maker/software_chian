@@ -830,10 +830,56 @@ class Worker:
     def run(self):
         _require_node_id()
         logger.info("Worker %s 启动: 大脑=%s 能力=%s", NODE_ID, BRAIN_URL, CAPABILITIES)
+        # Kafka 任务消费者（若 Kafka 可用）：消费大脑投递的 deep_analysis 任务
+        try:
+            from core.kafka_pipeline import KafkaConsumer
+            kafka_bs = os.environ.get("KAFKA_BOOTSTRAP", "121.41.98.7:9092")
+            consumer = KafkaConsumer(bootstrap_servers=kafka_bs,
+                                     group_id=f"supply-{NODE_ID}")
+            consumer.start(self._handle_kafka_task)
+        except Exception as exc:
+            logger.warning("Kafka 消费端启动失败（继续轮询大脑）: %s", exc)
         while not self.stop_event.is_set():
             self.heartbeat()
             self.poll_and_execute()
             self.stop_event.wait(HEARTBEAT_INTERVAL)
+
+    def _handle_kafka_task(self, task: dict) -> bool:
+        """处理 Kafka 拉取的任务。task 为顶层字段格式（来自大脑 kafka_pipeline）。
+
+        转换为 execute_task 需要的 params 结构后执行，回传大脑。
+        """
+        try:
+            kafka_task = {
+                "task_id": task.get("task_id", uuid.uuid4().hex),
+                "type": task.get("type", "deep_analysis"),
+                "params": {
+                    "project_slug": task.get("project_slug", "kafka"),
+                    "project_name": task.get("project_name", task.get("project_slug", "kafka")),
+                    "targets": task.get("targets", []),
+                    "online": task.get("online", True),
+                    "hypothesis": task.get("hypothesis", f"Kafka 任务 {task.get('task_id','')[:8]}"),
+                },
+            }
+            logger.info("Kafka 消费任务 %s (%d targets)", kafka_task["task_id"],
+                        len(kafka_task["params"]["targets"]))
+            result = execute_task(kafka_task)
+            report = {
+                "node_id": NODE_ID,
+                "name": NODE_NAME,
+                "status": "ready",
+                "capabilities": CAPABILITIES,
+                "metrics": _collect_system_metrics(),
+                "experiments": [result],
+            }
+            try:
+                self._post("/api/lab/report", report)
+            except Exception as exc:
+                logger.warning("Kafka 任务结果回传失败: %s", exc)
+            return result.get("status") != "error"
+        except Exception as exc:
+            logger.error("Kafka 任务处理异常: %s", exc)
+            return False
 
 
 def main():
