@@ -2,7 +2,7 @@
    软件供应链安全分析平台 - 前端 JavaScript
    ============================================================
    功能：
-   1. 模式切换（FOFA 搜索 / 手动输入）
+   1. 模式切换（测绘平台 搜索 / 手动输入）
    2. 提交分析请求
    3. 轮询分析进度
    4. 渲染分析结果（汇总卡片、表格、详情展开）
@@ -39,7 +39,7 @@
         tabManual: document.getElementById("tabManual"),
         fofaModeContent: document.getElementById("fofaModeContent"),
         manualModeContent: document.getElementById("manualModeContent"),
-        // FOFA 输入
+        // 测绘平台 输入
         fofaQuery: document.getElementById("fofaQuery"),
         fofaSize: document.getElementById("fofaSize"),
         fofaKey: document.getElementById("fofaKey"),
@@ -68,7 +68,7 @@
         // AI 分析
         aiAnalysisPanel: document.getElementById("aiAnalysisPanel"),
         aiAnalysisContent: document.getElementById("aiAnalysisContent"),
-        // FOFA 状态
+        // 测绘平台 状态
         fofaStatusBadge: document.getElementById("fofaStatusBadge"),
         aiStatusBadge: document.getElementById("aiStatusBadge"),
         showcaseAssets: document.getElementById("showcaseAssets"),
@@ -299,7 +299,7 @@
     }
 
     // ============================================================
-    // FOFA 配置状态检测
+    // 测绘平台 配置状态检测
     // ============================================================
 
     async function checkFofaConfig() {
@@ -317,7 +317,7 @@
                 badge.textContent = "资产数据源未配置";
                 badge.className = "status-badge not-configured";
                 els.fofaKey.value = "";
-                els.fofaKey.placeholder = "请输入 FOFA Key";
+                els.fofaKey.placeholder = "请输入 测绘平台 Key";
             }
 
             // 设置默认查询数量
@@ -367,7 +367,7 @@
         currentMode = mode;
 
         // 更新标签按钮状态
-        if (mode === "fofa") {
+        if (mode === "测绘平台") {
             els.tabFofa.classList.add("active");
             els.tabManual.classList.remove("active");
             show(els.fofaModeContent);
@@ -402,8 +402,8 @@
             const scanApi = els.scanApi.checked;
             const onlineQuery = els.onlineQuery.checked;
 
-            if (currentMode === "fofa") {
-                // FOFA 搜索模式
+            if (currentMode === "测绘平台") {
+                // 测绘平台 搜索模式
                 const query = els.fofaQuery.value.trim();
                 if (!query) {
                     throw new Error("请输入资产查询语句");
@@ -1399,19 +1399,19 @@
 
     function init() {
         // 模式切换
-        els.tabFofa.addEventListener("click", () => switchMode("fofa"));
+        els.tabFofa.addEventListener("click", () => switchMode("测绘平台"));
         els.tabManual.addEventListener("click", () => switchMode("manual"));
 
         // 开始分析
         els.startBtn.addEventListener("click", startAnalysis);
         els.cancelBtn.addEventListener("click", cancelAnalysis);
 
-        // 回车提交（FOFA 查询框）
+        // 回车提交（测绘平台 查询框）
         els.fofaQuery.addEventListener("keypress", function (e) {
             if (e.key === "Enter") startAnalysis();
         });
 
-        // 检测 FOFA 配置
+        // 检测 测绘平台 配置
         checkFofaConfig();
         // 检测 AI 配置状态
         checkAiConfig();
