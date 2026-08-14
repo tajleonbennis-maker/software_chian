@@ -1956,6 +1956,15 @@ def api_cards_decide(card_id):
     return jsonify({"error": "decision 必须是 worth/noise/insufficient/done"}), 400
 
 
+@app.route("/api/brain/events")
+def api_brain_events():
+    """大脑活动流（思考可视化）：研究大脑每一步动作 + 理由 + AI 思考摘要"""
+    limit = min(int(request.args.get("limit", "50")), 200)
+    event_type = request.args.get("type", "")
+    events = scan_database.brain_events(limit=limit, event_type=event_type)
+    return jsonify({"total": len(events), "events": events})
+
+
 @app.route("/api/analysis/project")
 def api_analysis_project():
     """热门组件专项分析（Dify 样板间）：版本分布 / 高危标记 / FOFA 语法 / 复验状态
