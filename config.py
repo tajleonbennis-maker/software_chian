@@ -92,3 +92,17 @@ class Config:
     _admin_pwd = os.environ.get("ADMIN_PASSWORD", "").strip()
     ADMIN_PASSWORD_CONFIGURED = bool(_admin_pwd and _admin_pwd != "your_admin_password")
     ADMIN_PASSWORD = _admin_pwd if ADMIN_PASSWORD_CONFIGURED else "admin123"
+
+    # ============================================================
+    # 告警推送配置（SK 泄露 / CRITICAL 资产 / 高危组件）
+    # ============================================================
+    # 通用 Webhook：任意 HTTP 端点，POST JSON（Grok 建议优先）
+    ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
+    # Telegram Bot（可选，配置 bot token + chat id 后启用）
+    ALERT_TELEGRAM_TOKEN = os.environ.get("ALERT_TELEGRAM_TOKEN", "")
+    ALERT_TELEGRAM_CHAT_ID = os.environ.get("ALERT_TELEGRAM_CHAT_ID", "")
+    # 推送级别阈值：>= 该级别才推送（CRITICAL / HIGH / MEDIUM / LOW）
+    ALERT_MIN_LEVEL = os.environ.get("ALERT_MIN_LEVEL", "CRITICAL")
+    # 是否推送新 SK 泄露（默认开）
+    ALERT_NOTIFY_LEAKS = os.environ.get("ALERT_NOTIFY_LEAKS", "true").lower() == "true"
+
