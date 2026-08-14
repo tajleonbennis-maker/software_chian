@@ -9,14 +9,49 @@
 """
 import json
 import logging
+import os
+import threading
 import time
 import urllib.request
 
 logger = logging.getLogger("Notifier")
 
+# 告警去重：key -> 上次推送时间戳（防告警风暴，Codex 建议）
+_alert_dedup = {}
+_alert_lock = threading.Lock()
+# 默认冷却时间（秒）：同一资产 + 同一类型的告警，在冷却期内不重复推送
+DEFAULT_COOLDOWN = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "3600"))
+
 
 def _now_str() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def alert_key(alert: dict) -> str:
+    """稳定去重键：asset + type + component（+ cve）"""
+    asset = (alert.get("asset") or "").strip()
+    atype = (alert.get("type") or "").strip()
+    component = (alert.get("component") or "").strip()
+    cve = (alert.get("cve_id") or "").strip()
+    return f"{asset}|{atype}|{component}|{cve}".lower()
+
+
+def is_duplicate(alert: dict, cooldown: int = DEFAULT_COOLDOWN) -> bool:
+    """判断是否冷却期内重复告警；非重复则登记"""
+    key = alert_key(alert)
+    if not key or key == "|||":
+        return False
+    now = time.time()
+    with _alert_lock:
+        last = _alert_dedup.get(key)
+        if last and (now - last) < cooldown:
+            return True
+        _alert_dedup[key] = now
+        # 简单内存清理：最多保留 5000 个键
+        if len(_alert_dedup) > 5000:
+            for k in list(_alert_dedup.keys())[:1000]:
+                _alert_dedup.pop(k, None)
+    return False
 
 
 def _mask_key(key: str, keep: int = 4) -> str:
@@ -98,8 +133,16 @@ def send_telegram(bot_token: str, chat_id: str, payload: dict, timeout: int = 10
         return False
 
 
-def notify(alert: dict, webhook_url: str = "", bot_token: str = "", chat_id: str = "") -> bool:
-    """统一告警入口：规范化 payload 并按已配置通道推送"""
+def notify(alert: dict, webhook_url: str = "", bot_token: str = "", chat_id: str = "",
+           cooldown: int = DEFAULT_COOLDOWN) -> bool:
+    """统一告警入口：去重 → 规范化 payload → 按已配置通道推送
+
+    返回 True 表示推送成功；去重命中（冷却期内）返回 False 且不推送。
+    """
+    # 去重：同一资产 + 类型 + 组件在冷却期内不重复推送
+    if is_duplicate(alert, cooldown):
+        logger.debug("告警去重命中，跳过: %s", alert_key(alert))
+        return False
     payload = format_alert(alert)
     sent = False
     if webhook_url:
