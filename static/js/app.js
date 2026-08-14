@@ -198,12 +198,27 @@
     }
 
     function renderPublicSummary(action, technical) {
+        // 优先展示研究资产库真实统计（与 Dashboard 同源）；无研究数据时回落为公开资产统计
+        const base = technical.research_assets_total > 0 ? technical : {
+            total_assets: technical.total_assets,
+            total_technologies: technical.total_technologies,
+            total_api_endpoints: technical.total_api_endpoints,
+            total_vulnerabilities: technical.total_vulnerabilities,
+            identified_project_families: technical.identified_project_families,
+        };
+        const assetText = base.research_assets_total > 0
+            ? `共 <strong>${base.research_assets_total}</strong> 条研究资产`
+            : `共 <strong>${base.total_assets || 0}</strong> 条资产`;
+        const vulnText = base.research_vuln_total > 0
+            ? `<strong>${base.research_vuln_total}</strong> 个漏洞（高危 ${base.research_risk_critical_high || 0}）`
+            : `<strong>${base.total_vulnerabilities || 0}</strong> 个漏洞`;
         els.publicSummary.innerHTML = `
-            <span>共 <strong>${technical.total_assets || 0}</strong> 条资产</span>
+            <span>${assetText} · 已分析 <strong>${base.research_assets_analyzed || 0}</strong></span>
+            <span>${vulnText}</span>
             <span><strong>${action.action_assets || 0}</strong> 个风险资产</span>
-            <span><strong>${technical.identified_project_families || 0}</strong> 个开源项目家族</span>
-            <span><strong>${technical.total_technologies || 0}</strong> 个产品指纹</span>
-            <span><strong>${technical.total_api_endpoints || 0}</strong> 个 API 端点</span>`;
+            <span><strong>${base.identified_project_families || 0}</strong> 个开源项目家族</span>
+            <span><strong>${base.total_technologies || 0}</strong> 个产品指纹</span>
+            <span><strong>${base.total_api_endpoints || 0}</strong> 个 API 端点${base.research_api_exposed ? ` · 暴露 ${base.research_api_exposed}` : ''}</span>`;
     }
 
     function renderFacets() {
