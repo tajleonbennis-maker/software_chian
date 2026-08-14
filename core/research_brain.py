@@ -62,12 +62,14 @@ OFFICIAL_DOMAINS = {
 
 
 class ResearchBrain:
-    def __init__(self, database, config, analyze_callback=None, probe_callback=None):
+    def __init__(self, database, config, analyze_callback=None, probe_callback=None,
+                 node_planner=None):
         self.database = database
         self.config = config
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.analyze_callback = analyze_callback
+        self.node_planner = node_planner
         self.probe_callback = probe_callback
         self._last_intelligence_sync = 0.0
         self.database.seed_research_projects(SEED_PROJECTS)
@@ -279,13 +281,27 @@ class ResearchBrain:
         self.database.brain_event("action", "开始分析", f"{project['name']} 深度分析待处理资产",
                                   project=project["slug"],
                                   meta={"pending": project.get("pending_count", 0)})
+        # 多节点并行：把本批待分析资产分发给节点集群做 deep_analysis（SK 泄露检测等）
+        dispatched = 0
+        if getattr(self, "node_planner", None):
+            try:
+                pending_batch = self.database.pending_research_assets(
+                    project["slug"], self.config.RESEARCH_ANALYSIS_BATCH)
+                targets = [c["asset"].get("url") for c in pending_batch
+                           if c.get("asset", {}).get("url")]
+                if targets:
+                    d = self.node_planner.dispatch_pending(
+                        project["slug"], targets, project["name"])
+                    dispatched = d.get("dispatched", 0)
+            except Exception as exc:
+                logger.warning("节点分发失败，回退本地: %s", exc)
         analyzed_count = self._execute_analysis(project)
         if analyzed_count:
             self.database.brain_event("result", "分析完成", f"{project['name']} 本轮分析 {analyzed_count} 资产",
                                       project=project["slug"], meta={"batch": analyzed_count})
             self._analyze_project_results(project)
-        logger.info("执行轮次完成: %s confirmed=%d batch=%d", project["name"],
-                    analyzed_count, self.config.RESEARCH_ANALYSIS_BATCH)
+        logger.info("执行轮次完成: %s confirmed=%d batch=%d dispatched=%d", project["name"],
+                    analyzed_count, self.config.RESEARCH_ANALYSIS_BATCH, dispatched)
         return analyzed_count
 
     def _execute_analysis(self, project: Dict[str, Any]) -> int:
@@ -307,8 +323,10 @@ class ResearchBrain:
                 confirmation = self._confirm_project(project, candidate["asset"], light_result)
                 if not confirmation["confirmed"]:
                     light_result["project_confirmation"] = confirmation
+                    reject_reason = "确认未通过: " + "; ".join(confirmation.get("evidence", []))[:900]
                     self.database.save_research_analysis(candidate["identity"], project["slug"],
-                                                         light_result, status="rejected")
+                                                         light_result, error=reject_reason,
+                                                         status="rejected")
                     return False
                 result = self.analyze_callback(candidate["asset"], True)
                 result["project_confirmation"] = confirmation
@@ -365,7 +383,10 @@ class ResearchBrain:
         probe = analysis.get("project_probe") or {}
         if probe.get("matched"):
             evidence.append("项目专属端点返回匹配响应"); score += 2
-        confirmed = score >= 2
+        # 敏感信息本身即强信号：即使指纹不足，前端 JS 泄露的 key/敏感字段也证明是目标部署
+        if any(findings for findings in analysis.get("exposure_findings", [])):
+            evidence.append("前端暴露面命中（可能泄露敏感信息）"); score += 1
+        confirmed = score >= 1
         if not confirmed:
             evidence.append("证据不足：仅标题命中或没有项目专属指纹")
         return {"confirmed": confirmed, "confidence": "high" if score >= 3 else "medium" if confirmed else "low",
