@@ -121,6 +121,9 @@ class ScanDatabase:
                 source_path TEXT NOT NULL DEFAULT '',
                 evidence TEXT,
                 status TEXT NOT NULL DEFAULT 'new',
+                verified_status TEXT NOT NULL DEFAULT 'unverified',
+                verified_detail TEXT NOT NULL DEFAULT '',
+                verified_at REAL,
                 first_seen REAL NOT NULL,
                 last_seen REAL NOT NULL
             )""")
@@ -449,6 +452,8 @@ class ScanDatabase:
             "candidate_count": sum(counts.values()), "confirmed_count": confirmed,
             "rejected_count": counts.get("rejected", 0),
             "pending_count": counts.get("pending", 0) + counts.get("running", 0),
+            "reject_reasons": {} if not samples else {},
+            "confirmed_samples": samples,
             "confirmation_rate": round(confirmed / total_decided, 4) if total_decided else None,
             "samples": [{
                 "confirmation": sample.get("project_confirmation", {}),
@@ -458,6 +463,22 @@ class ScanDatabase:
                     for field in finding.get("sensitive_field_types", [])}),
             } for sample in samples],
         }
+
+    def research_asset_urls(self, project_slug: str, limit: int = 100) -> List[str]:
+        """取某项目研究资产的 url 列表（用于泄露回扫等批量探测）"""
+        with self._connect() as db:
+            rows = db.execute("""SELECT asset_json FROM research_assets
+                WHERE project_slug=? LIMIT ?""", (project_slug, limit)).fetchall()
+        urls = []
+        for row in rows:
+            try:
+                a = json.loads(row["asset_json"])
+                u = a.get("url") or ""
+                if u:
+                    urls.append(u)
+            except Exception:
+                continue
+        return urls
 
     def save_research_hypothesis(self, hypothesis: Dict[str, Any]):
         now = time.time()
@@ -606,7 +627,7 @@ class ScanDatabase:
                 return existing["leak_id"]
             leak_id = leak.get("leak_id") or (hashlib.md5(
                 (str(leak.get("target", "")) + "|" + str(full_key)).encode()).hexdigest())
-            db.execute("""INSERT INTO credential_leaks
+            db.execute("""INSERT OR IGNORE INTO credential_leaks
                 (leak_id, target, node_id, provider, base_url, api_key_masked, api_key_full,
                  secret_type, source_path, evidence, status, first_seen, last_seen)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -617,6 +638,18 @@ class ScanDatabase:
                  json.dumps(leak.get("evidence", []), ensure_ascii=False),
                  leak.get("status", "new"), now, now))
             return leak_id
+
+    def update_credential_leak_verification(self, leak_id: str, verified_status: str,
+                                            detail: str = "", base_url: str = "",
+                                            provider: str = ""):
+        """更新泄露 key 的有效性验证结果（verified_status: valid/invalid/error）"""
+        with self._lock, self._connect() as db:
+            db.execute("""UPDATE credential_leaks SET verified_status=?, verified_detail=?,
+                       verified_at=?, base_url=CASE WHEN ?!='' THEN ? ELSE base_url END,
+                       provider=CASE WHEN ?!='' THEN ? ELSE provider END
+                       WHERE leak_id=?""",
+                       (verified_status, detail[:500], time.time(),
+                        base_url, base_url, provider, provider, leak_id))
 
     def list_credential_leaks(self, limit: int = 100, status: str = "",
                               target: str = "", include_full: bool = False) -> List[Dict[str, Any]]:
@@ -640,8 +673,9 @@ class ScanDatabase:
             rows = db.execute(sql, params).fetchall()
         leaks = [dict(row) for row in rows]
         for l in leaks:
-            if include_full and l.get("api_key_full"):
-                l["api_key_full"] = decrypt_secret(l["api_key_full"])
+            if include_full:
+                # 返回原始存储值（可能是 enc:v1: 密文或明文），由调用方解密
+                l["api_key_full"] = l.get("api_key_full", "") or ""
             else:
                 l.pop("api_key_full", None)
         return leaks
@@ -656,7 +690,14 @@ class ScanDatabase:
                 "SELECT secret_type, COUNT(*) c FROM credential_leaks GROUP BY secret_type").fetchall())
             by_target = dict(db.execute(
                 "SELECT target, COUNT(*) c FROM credential_leaks GROUP BY target ORDER BY c DESC LIMIT 20").fetchall())
-        return {"total": total, "by_provider": by_provider, "by_type": by_type, "by_target": by_target}
+            verified = {}
+            try:
+                verified = dict(db.execute(
+                    "SELECT verified_status, COUNT(*) c FROM credential_leaks GROUP BY verified_status").fetchall())
+            except Exception:
+                pass
+        return {"total": total, "by_provider": by_provider, "by_type": by_type,
+                "by_target": by_target, "by_verified": verified}
 
     # ============================================================
     # 告警 outbox（持久化投递队列，Codex P1）
