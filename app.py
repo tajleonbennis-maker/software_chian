@@ -15,6 +15,7 @@
 """
 import os
 import sys
+import hashlib
 import uuid
 import time
 import logging
@@ -1838,23 +1839,36 @@ def generate_decision_cards() -> int:
         sc = api_supply_chain_overview_data()
         now = time.time()
         for comp in (sc.get("top_risk_components") or [])[:15]:
+            comp_name = comp.get("component", "")
             sev = "CRITICAL" if comp.get("critical") else "HIGH"
+            # 攻击情报标记（Issue #10 目标 3）：查询该组件是否有 CISA KEV 在野利用记录
+            attack = {}
+            try:
+                attack = scan_database.threat_intel_for_component(comp_name.lower())
+            except Exception:
+                pass
+            attack_note = ""
+            if attack.get("total"):
+                sev = "CRITICAL"  # 在野被利用 → 直接 CRITICAL
+                attack_note = f"⚠️ 正在被利用：CISA KEV 记录 {attack['total']} 条" + \
+                              ("（含勒索软件利用）" if attack.get("ransomware") else "")
             card = build_card(
-                comp.get("component", ""),
+                comp_name,
                 severity=sev,
                 evidence_level=2,                      # L2 版本+漏洞条件匹配
                 asset_count=comp.get("vuln_count", 0),
                 is_new=False,
                 has_api=False,
                 source="supply-chain",
-                fofa_query=f'header="{comp.get("component")}" || app="{comp.get("component")}"',
-                change_text=f"{comp.get('component')} 关联 {comp.get('vuln_count', 0)} 个漏洞观测",
-                why_worth="高频组件 + 已知漏洞，值得确认是否命中受影响版本",
+                fofa_query=f'header="{comp_name}" || app="{comp_name}"',
+                change_text=f"{comp_name} 关联 {comp.get('vuln_count', 0)} 个漏洞观测{(' · ' + attack_note) if attack_note else ''}",
+                why_worth=attack_note if attack_note else "高频组件 + 已知漏洞，值得确认是否命中受影响版本",
                 evidence_says=f"在资产库中检测到 {comp.get('vuln_count', 0)} 条漏洞记录（组件维度）",
                 evidence_limits="版本区间匹配（L2），未经授权验证不能确认可利用",
                 next_step="打开资产库筛选该组件 → 复核版本 → 确认是否命中受影响区间",
                 abort_condition="版本均不在受影响区间，或样本全部消失",
                 card_type="component",
+                payload={"kev_total": attack.get("total", 0), "kev_ransomware": attack.get("ransomware", 0)},
             )
             if db.card_insert(card):
                 cards_created += 1
@@ -1963,6 +1977,82 @@ def api_brain_events():
     event_type = request.args.get("type", "")
     events = scan_database.brain_events(limit=limit, event_type=event_type)
     return jsonify({"total": len(events), "events": events})
+
+
+@app.route("/api/threat-intel/sync", methods=["POST"])
+def api_threat_intel_sync():
+    """手动同步 CISA KEV 攻击情报（Issue #10 目标 3）"""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    from core.threat_intel import fetch_attack_intel
+    result = fetch_attack_intel(scan_database)
+    scan_database.brain_event(event_type="sync", action="攻击情报同步",
+                              detail=f"KEV 拉取 {result.get('total_kev', 0)} 条",
+                              reason="CISA KEV 在野利用漏洞清单",
+                              meta={"kev_total": result.get("total_kev", 0),
+                                    "matched_components": len(result.get("matched", {}))})
+    return jsonify(result)
+
+
+@app.route("/api/threat-intel")
+def api_threat_intel():
+    """攻击情报概览 + 指定组件详情。?component=nginx"""
+    component = request.args.get("component", "")
+    if component:
+        return jsonify(scan_database.threat_intel_for_component(component))
+    return jsonify(scan_database.threat_intel_overview())
+
+
+@app.route("/api/code-audit", methods=["POST"])
+def api_code_audit():
+    """代码审计（Issue #10 目标 1/6）。Body: {"repo": "..."}
+    异步执行：立即返回 audit_id，前端轮询 /api/code-audits 查看结果。
+    """
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    repo = (payload.get("repo") or "").strip()
+    if not repo:
+        return jsonify({"error": "repo 必填"}), 400
+    audit_id = hashlib.md5(repo.encode()).hexdigest()
+
+    def _run_audit():
+        try:
+            from core.code_audit import audit_repo
+            from core.ai_analyzer import AIAnalyzer
+            work_dir = os.path.join(BASE_DIR, "data", "audits")
+            os.makedirs(work_dir, exist_ok=True)
+            ai = None
+            if Config.DEEPSEEK_API_KEY:
+                ai = AIAnalyzer(Config.DEEPSEEK_API_KEY, Config.DEEPSEEK_BASE_URL,
+                                Config.DEEPSEEK_MODEL, Config.AI_TIMEOUT)
+            scan_database.brain_event(event_type="action", action="代码审计",
+                                      detail=f"开始审计 {repo}",
+                                      reason="Issue #10 目标 1/6：回答为什么这个项目会出安全问题")
+            report = audit_repo(repo, work_dir, ai_analyzer=ai)
+            scan_database.save_code_audit(report)
+            risk = (report.get("ai_report") or {}).get("risk_level", "unknown")
+            scan_database.brain_event(event_type="result", action="审计完成",
+                                      detail=f"{repo} 风险等级 {risk} · {report.get('files_with_danger', 0)} 个文件有发现",
+                                      reason="静态扫描 + AI 研判")
+        except Exception as exc:
+            logger.warning("代码审计失败 %s: %s", repo, exc)
+            scan_database.save_code_audit({
+                "repo": repo, "repo_path": "", "files_scanned": 0, "files_with_danger": 0,
+                "ai_report": {"error": str(exc), "risk_level": "unknown"},
+                "findings": [], "danger_by_type": {}, "duration_seconds": 0,
+            })
+
+    threading.Thread(target=_run_audit, daemon=True).start()
+    return jsonify({"ok": True, "audit_id": audit_id, "repo": repo,
+                    "status": "running", "note": "审计后台执行中，轮询 /api/code-audits 查看"})
+
+
+@app.route("/api/code-audits")
+def api_code_audits():
+    """代码审计记录列表"""
+    limit = min(int(request.args.get("limit", "20")), 50)
+    return jsonify({"audits": scan_database.list_code_audits(limit=limit)})
 
 
 @app.route("/api/analysis/project")
