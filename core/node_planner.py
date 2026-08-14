@@ -38,6 +38,14 @@ class NodePlanner:
         self.config = config
         self._dispatch_lock = threading.Lock()
         self._round_counter = 0
+        # Kafka 任务队列（优先投递，broker 不可用时回退 HTTP 推送）
+        try:
+            from core.kafka_pipeline import KafkaProducer
+            kafka_bs = getattr(config, "KAFKA_BOOTSTRAP", "") or "121.41.98.7:9092"
+            self.kafka = KafkaProducer(bootstrap_servers=kafka_bs)
+        except Exception as exc:
+            logger.warning("Kafka 生产者初始化失败: %s", exc)
+            self.kafka = None
         # 在途任务：node_id -> 派发时间戳。派发后节点标记繁忙，直到回传或超时
         self._in_flight: dict = {}
 
@@ -164,15 +172,41 @@ class NodePlanner:
                          project_name: str = "") -> dict:
         """把待分析资产分发给节点集群。
 
-        返回统计；节点不可用时返回 ok=False（由调用方决定回退本地）。
+        优先通过 Kafka 投递（节点消费）；Kafka 不可用时回退 HTTP 推送。
+        返回统计；无可用渠道时返回 ok=False。
         """
-        nodes = self.list_workers()
-        if not nodes:
-            return {"ok": False, "reason": "无可用节点", "dispatched": 0}
         if not targets:
             return {"ok": True, "dispatched": 0, "reason": "无待分析资产"}
 
-        # 按节点数切分资产
+        # 渠道1: Kafka 投递（节点作为消费者并行消费）
+        if self.kafka and self.kafka.available:
+            chunk = max(1, len(targets) // 4)  # 每任务最多 20 资产
+            tasks = []
+            for i in range(0, len(targets), chunk):
+                batch = targets[i:i + chunk]
+                tasks.append({
+                    "task_id": uuid.uuid4().hex,
+                    "type": "deep_analysis",
+                    "project_slug": project_slug,
+                    "project_name": project_name or project_slug,
+                    "targets": batch,
+                    "online": True,
+                })
+            sent = self.kafka.send_batch(tasks)
+            self.database.brain_event(
+                event_type="action", action="Kafka 任务分发",
+                detail=f"{project_name or project_slug} {len(targets)} 资产 → Kafka {sent['sent']} 任务",
+                reason="节点通过 Kafka 消费 deep_analysis",
+                project=project_slug,
+                meta={"topic": sent.get("topic"), "sent": sent["sent"], "assets": len(targets)})
+            return {"ok": sent["sent"] > 0, "dispatched": sent["sent"],
+                    "channel": "kafka", "assets": len(targets), "sent": sent}
+
+        # 渠道2: HTTP 推送（Kafka 不可用）
+        nodes = self.list_workers()
+        if not nodes:
+            return {"ok": False, "reason": "无可用节点且 Kafka 不可用", "dispatched": 0}
+
         dispatched = []
         chunk = max(1, len(targets) // len(nodes))
         for i in range(0, len(targets), chunk):
