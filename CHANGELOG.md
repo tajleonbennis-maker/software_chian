@@ -1,57 +1,63 @@
 # Changelog
 
-本文件记录 **CyberStroll**（仓库 `software_chian`）对用户可见的进展。  
-格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循研究预览语义。
+Visible progress for **CyberStroll** (repository `software_chian`).  
+Format inspired by [Keep a Changelog](https://keepachangelog.com/). Research-preview versioning.
 
 ---
 
 ## [Unreleased]
 
+### Added
+
+- English-primary [README.md](./README.md) with language switcher  
+- Chinese README: [README.zh-CN.md](./README.zh-CN.md)  
+- English-primary [CONTRIBUTING.md](./CONTRIBUTING.md)  
+
 ### Planned
 
-- 每日情报简报稳定推送（Telegram / Webhook）
-- 组件专项报告导出（一页纸）
-- 可复核证据包（来源 / 时间 / 置信度 / FOFA 语法）
-- README 演示截图与公开可访问的脱敏案例页
+- Daily intelligence brief delivery (Telegram / Webhook)  
+- One-page component special reports  
+- Evidence packs (source / time / confidence / query syntax)  
+- Redacted dashboard screenshots in README  
+- English whitepaper (`docs/WHITEPAPER.en.md`)  
 
 ---
 
 ## [0.1.0-research] — 2026-08-14
 
-Research Preview 基线：文档与产品叙事对齐，研究链路可运行。
+Research Preview baseline: documentation and product narrative aligned; research pipeline operational.
 
 ### Added
 
-- 产品白皮书 [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md)
-- 仓库维护规范 [`docs/MAINTENANCE.md`](./docs/MAINTENANCE.md)
-- 贡献说明 [`CONTRIBUTING.md`](./CONTRIBUTING.md)
-- Issue 模板（缺陷 / 需求 / 安全研究）
-- 品牌化 README（CyberStroll）
+- Product whitepaper [`docs/WHITEPAPER.md`](./docs/WHITEPAPER.md) (Chinese)  
+- Maintenance playbook [`docs/MAINTENANCE.md`](./docs/MAINTENANCE.md)  
+- Contributing guide & issue templates  
+- Brand-oriented README (CyberStroll)  
 
 ### Research & platform (runtime)
 
-- 安全大脑 + 多执行引擎调度模型
-- FOFA 风格测绘发现与热搜驱动研究队列
-- 资产指纹、漏洞匹配、API 遍历、凭据（SK）检测（脱敏入库）
-- Dashboard / 研究资产库（实验运营）
-- 责任披露样例：DeepTutor `GET /api/v1/settings` 未认证目录泄露分析（[Issue #11](https://github.com/tajleonbennis-maker/software_chian/issues/11)）
+- Security Brain + multi-engine dispatch model  
+- FOFA-style discovery and trend-driven research queue  
+- Fingerprinting, vuln matching, API crawl, credential detection (redacted storage)  
+- Dashboard / research asset store (experimental ops)  
+- Responsible-disclosure sample: DeepTutor unauthenticated settings catalog leak ([Issue #11](https://github.com/tajleonbennis-maker/software_chian/issues/11))  
 
 ### Security posture
 
-- 对外材料强制密钥脱敏
-- 明确「疑似 / 已复验」口径与禁止夸大全网结论
+- Public materials require secret redaction  
+- Suspected vs verified wording; no inflated “whole-Internet” claims  
 
 ### Known limitations
 
-- 主交付物「每日简报」仍在建设，Dashboard 仍是主要工作台
-- 仓库目录名历史拼写 `software_chian` 尚未重命名
-- 完整对外安装体验与多租户不在本版本范围
+- Daily brief still under construction; dashboard remains the main workbench  
+- Legacy folder name `software_chian` not renamed yet  
+- Full public install / multi-tenant SaaS out of scope for this version  
 
 ---
 
-## 版本说明
+## Version tags
 
-| 标签 | 含义 |
-|------|------|
-| `0.x.y-research` | 研究预览，接口与数据模型可能变化 |
-| `Unreleased` | 已决定做、尚未打标签 |
+| Tag | Meaning |
+|-----|---------|
+| `0.x.y-research` | Research preview; APIs and models may change |
+| `Unreleased` | Decided work, not yet tagged |
