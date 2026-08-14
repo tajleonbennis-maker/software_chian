@@ -1066,7 +1066,24 @@ def api_showcase():
         if task.get("status") == "completed"
     ]
     if not completed:
-        return jsonify({"task_count": 0, "summary": {}, "assets": []})
+        # 无手动扫描任务时，仍返回研究资产库真实统计（与 Dashboard 同源），避免首页全 0
+        try:
+            sc = api_supply_chain_overview_data()
+            empty_summary = {
+                "total_assets": 0, "total_technologies": 0, "total_api_endpoints": 0,
+                "total_vulnerabilities": 0, "identified_project_families": 0,
+                "research_assets_total": sc.get("total_assets", 0),
+                "research_assets_analyzed": sc.get("analyzed_assets", 0),
+                "research_vuln_total": sc.get("vuln_total", 0),
+                "research_risk_critical_high": (sc.get("risk_buckets") or {}).get("CRITICAL", 0)
+                    + (sc.get("risk_buckets") or {}).get("HIGH", 0),
+                "research_api_exposed": sc.get("api_exposed_assets", 0),
+                "avg_components": sc.get("avg_components", 0),
+            }
+        except Exception:
+            empty_summary = {}
+        return jsonify({"task_count": 0, "summary": empty_summary, "assets": [],
+                        "risk_events": [], "action_summary": {"action_assets": 0}})
 
     # Tasks are newest first. Keep the newest observation for each URL or
     # IP/port identity while retaining provenance and first-seen time.
@@ -1150,6 +1167,18 @@ def api_showcase():
         }),
         "severity_distribution": severity_distribution,
     }
+    # 补充研究资产库真实统计（与 Dashboard 同源：research_assets 全量 + 分析结果）
+    try:
+        sc_overview = api_supply_chain_overview_data()
+        summary["research_assets_total"] = sc_overview.get("total_assets", 0)
+        summary["research_assets_analyzed"] = sc_overview.get("analyzed_assets", 0)
+        summary["research_vuln_total"] = sc_overview.get("vuln_total", 0)
+        summary["research_risk_critical_high"] = (sc_overview.get("risk_buckets") or {}).get("CRITICAL", 0) + \
+            (sc_overview.get("risk_buckets") or {}).get("HIGH", 0)
+        summary["research_api_exposed"] = sc_overview.get("api_exposed_assets", 0)
+        summary["avg_components"] = sc_overview.get("avg_components", 0)
+    except Exception as exc:
+        logger.warning("补充研究资产统计失败: %s", exc)
     event_groups = {}
     for item in public_assets:
         asset = item["asset"]
@@ -1639,6 +1668,11 @@ def api_asset_detail():
 @app.route("/api/supply-chain/overview")
 def api_supply_chain_overview():
     """供应链健康仪表盘：资产组件分布、漏洞组件占比、高风险组件 TopN、API 暴露率"""
+    return jsonify(api_supply_chain_overview_data())
+
+
+def api_supply_chain_overview_data() -> Dict[str, Any]:
+    """供应链健康统计（可被 /api/showcase 复用）"""
     from core.database import ScanDatabase
     db = ScanDatabase(Config.DATABASE_PATH)
 
@@ -1706,7 +1740,7 @@ def api_supply_chain_overview():
                            "vuln_assets": vuln_component_counter.get(c, 0)}
                           for c, n in top_components]
 
-    return jsonify({
+    return {
         "total_assets": total_assets,
         "analyzed_assets": analyzed_assets,
         "vuln_total": vuln_total,
@@ -1716,7 +1750,7 @@ def api_supply_chain_overview():
         "top_risk_components": top_risk,
         "top_components": top_component_list,
         "avg_components": round(sum(component_counter.values()) / analyzed_assets, 2) if analyzed_assets else 0,
-    })
+    }
 
 
 @app.route("/api/leaks")
