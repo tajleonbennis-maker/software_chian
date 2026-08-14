@@ -532,7 +532,7 @@ def run_analysis(task_id: str, mode: str, fofa_query: str, fofa_key: str,
     Args:
         task_id: 任务 ID
         mode: 分析模式（"fofa" 或 "manual"）
-        fofa_query: FOFA 查询语句
+        fofa_query: 测绘平台查询语句
         fofa_key: FOFA Key
         fofa_size: FOFA 返回结果数量
         url_text: 手动输入的 URL 文本
@@ -561,7 +561,7 @@ def run_analysis(task_id: str, mode: str, fofa_query: str, fofa_key: str,
             if not key:
                 raise ValueError("缺少资产数据源访问凭据，请联系管理员配置")
 
-            logger.info("任务 %s: 使用 FOFA 搜索 '%s', size=%d", task_id, fofa_query, fofa_size)
+            logger.info("任务 %s: 使用测绘平台搜索 '%s', size=%d", task_id, fofa_query, fofa_size)
             client = FofaClient(key=key, timeout=Config.SCAN_TIMEOUT + 20)
             try:
                 assets = client.search_all(fofa_query, max_results=fofa_size)
@@ -821,7 +821,7 @@ def api_analyze():
     """执行分析 - 接收 FOFA 查询参数，启动后台分析线程（需要管理员权限）
 
     请求参数（JSON 或表单）：
-        query: FOFA 查询语句
+        query: 测绘平台查询语句
         fofa_key: FOFA Key（可选）
         size: 返回结果数量（默认 100）
         scan_api: 是否扫描 API（"true"/"false"）
@@ -873,7 +873,7 @@ def api_analyze():
     )
     thread.start()
 
-    logger.info("已创建 FOFA 分析任务: %s (query=%r)", task_id, fofa_query)
+    logger.info("已创建测绘平台分析任务: %s (query=%r)", task_id, fofa_query)
     return jsonify({"task_id": task_id, "status": "pending"})
 
 
@@ -1487,7 +1487,7 @@ def api_experiment_detail(experiment_id):
 
 @app.route("/api/assets")
 def api_assets():
-    """FoFa 风格资产列表：聚合 research_assets + 实验 evidence 中的资产
+    """测绘平台风格资产列表：聚合 research_assets + 实验 evidence 中的资产
 
     ?query= 搜索过滤（host/ip/title）
     ?limit= 条数（默认 100，求质不求量）
@@ -1705,7 +1705,7 @@ def api_asset_detail():
         conf = "low"
     detail["confidence"] = conf
     # 数据来源标签：FOFA / 主动探测 / 实验
-    detail["data_source"] = "FOFA" if detail.get("source") == "database" else "主动探测"
+    detail["data_source"] = "测绘平台" if detail.get("source") == "database" else "主动探测"
     return jsonify(detail)
 
 
@@ -1908,9 +1908,9 @@ def generate_decision_cards() -> int:
                 has_api=False,
                 source="fofa-trend",
                 fofa_query=f'"{name}"',
-                change_text=f"{name} 进入 FoFa 热搜（momentum={s.get('momentum', '?')}）",
+                change_text=f"{name} 进入测绘平台热搜（momentum={s.get('momentum', '?')}）",
                 why_worth="热搜上升通常伴随注意力/风险集中，值得先快速看一眼",
-                evidence_says="FoFa 热搜信号（L0 观测）",
+                evidence_says="测绘平台热搜信号（L0 观测）",
                 evidence_limits="仅热度信号，无资产级证据",
                 next_step="用 FOFA 语法快速抽查公开部署 → 有信号则转正式研判卡",
                 abort_condition="抽查无异常部署，热度回落",
