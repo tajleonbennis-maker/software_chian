@@ -816,6 +816,12 @@ def dashboard():
     return send_from_directory(BASE_DIR, "dashboard.html")
 
 
+@app.route("/situation")
+def situation():
+    """态势感知大屏 - 全屏实时安全态势可视化"""
+    return send_from_directory(BASE_DIR, "situation.html")
+
+
 @app.route("/api/analyze", methods=["POST"])
 @require_admin
 def api_analyze():
