@@ -347,6 +347,8 @@ a:hover { text-decoration: underline; }
     <div id="overview-assets"><div class="empty-hint">加载中...</div></div>
     <div class="section-label">供应链健康</div>
     <div class="card" id="supply-overview"><div class="empty-hint">加载中...</div></div>
+    <div class="section-label">🔴 攻击情报（CISA KEV 在野利用）</div>
+    <div class="card" id="threat-overview"><div class="empty-hint">加载中...</div></div>
   </div>
 
   <!-- ===== 扫描任务 ===== -->
@@ -694,7 +696,30 @@ async function loadOverview() {
     }).join('') || '<div class="empty-hint">暂无资产，先在对话区下发 测绘扫描任务</div>';
     // 供应链健康摘要
     renderSupplyChain(sc);
+    loadThreatIntel();
   } catch(e) { document.getElementById('overview-assets').innerHTML = '<div class="empty-hint">加载失败</div>'; }
+}
+async function loadThreatIntel() {
+  const el = document.getElementById('threat-overview');
+  try {
+    const d = await api('/api/threat-intel');
+    const bc = d.by_component || {};
+    const entries = Object.entries(bc).sort((a,b) => b[1]-a[1]).slice(0,10);
+    if (!entries.length) { el.innerHTML = '<div class="empty-hint">暂无攻击情报（可手动同步 CISA KEV）</div>'; return; }
+    const max = entries[0][1];
+    el.innerHTML = `
+      <div class="metric-row"><span class="k">在野利用漏洞（KEV）</span><span class="v">${d.total||0} 条 · ${entries.length}+ 组件命中</span></div>
+      <div class="metric-row"><span class="k">勒索软件利用</span><span class="v" style="color:${d.ransomware_total?'var(--accent-red)':'var(--text-secondary)'}">${d.ransomware_total||0} 条</span></div>
+      <div class="metric-row"><span class="k">最后同步</span><span class="v">${d.last_sync?new Date((d.last_sync||0)*1000).toLocaleString():'-'}</span></div>
+      <div style="margin-top:8px">${entries.map(([c,n]) => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span class="k" style="width:110px;flex-shrink:0">🔥 ${escapeHtml(c)}</span>
+          <div style="flex:1;background:var(--bg-tertiary);border-radius:4px;height:14px;overflow:hidden">
+            <div style="width:${Math.round(n/max*100)}%;height:100%;background:${n>=20?'var(--accent-red)':n>=5?'var(--accent-orange)':'#d29922'}"></div>
+          </div>
+          <span class="v" style="width:40px;text-align:right">${n}</span>
+        </div>`).join('')}</div>`;
+  } catch(e) { el.innerHTML = '<div class="empty-hint">加载失败</div>'; }
 }
 function renderSupplyChain(sc) {
   const el = document.getElementById('supply-overview');
