@@ -833,7 +833,9 @@ def index():
 @app.route("/dashboard")
 def dashboard():
     """大脑监控中心 - 实时节点状态 / 数据可视化 / 对话接口"""
-    return send_from_directory(BASE_DIR, "dashboard.html")
+    resp = send_from_directory(BASE_DIR, "dashboard.html")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.route("/situation")
