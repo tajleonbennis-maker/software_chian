@@ -1,130 +1,143 @@
 # CyberStroll
 
-**测绘驱动的软件供应链 · API 安全情报系统**  
-*Mapping-driven software supply-chain & API security intelligence*
+**Mapping-driven software supply-chain & API security intelligence**
 
-> 仓库目录名仍为 `software_chian`（历史拼写）。对外品牌统一使用 **CyberStroll**。
+[![Research Preview](https://img.shields.io/badge/status-research%20preview-orange)](./CHANGELOG.md)
+[![Docs](https://img.shields.io/badge/docs-whitepaper-blue)](./docs/WHITEPAPER.md)
 
-[产品白皮书](./docs/WHITEPAPER.md) · [更新日志](./CHANGELOG.md) · [维护规范](./docs/MAINTENANCE.md) · [参与贡献](./CONTRIBUTING.md)
+**Languages:** **English** · [简体中文](./README.zh-CN.md)
+
+> The Git repository folder is still named `software_chian` (legacy typo). The public product name is **CyberStroll**.
+
+[Whitepaper](./docs/WHITEPAPER.md) · [Changelog](./CHANGELOG.md) · [Maintenance](./docs/MAINTENANCE.md) · [Contributing](./CONTRIBUTING.md)
 
 ---
 
-## 一句话
+## What it is
 
-用网络空间测绘数据，发现公网暴露的热门开源组件与 API 风险，产出安全研究人员能**每日消费**的情报简报与**可复核**结论——而不是又一张资产大表。
+CyberStroll turns **cyberspace mapping data** (FOFA-style discovery, trending components, public deployments) into **actionable security intelligence**—not another giant asset table.
 
-## 三个问题
+We help researchers answer three questions:
 
-1. **什么暴露在外面？** 热门组件 / 项目的公网部署与版本分布  
-2. **哪些有真实风险？** 指纹 → 漏洞（疑似 / 已复验）→ API → 密钥泄露  
-3. **今天该看什么？** 简报、专项报告、带证据的告警  
+1. **What is exposed?** Public deployments and version spread of popular open-source components/projects  
+2. **What is actually risky?** Fingerprinting → vulnerability matching (**suspected** vs **verified**) → API exposure → credential leaks  
+3. **What should I look at today?** Daily briefs, component deep-dives, and evidence-backed alerts  
 
-## 架构原则
+---
+
+## Architecture in one diagram
 
 ```text
-安全大脑（思考 · 指挥 · 研判 · 汇报）
-        │ 任务下发 / 证据回传
+Security Brain (plan · judge · dispatch · report)
+        │ tasks out / evidence in
         ▼
-执行引擎 × N（探测 · 指纹 · API · 取证）
+Execution engines × N (probe · fingerprint · API crawl · collect evidence)
 ```
 
-- 没有任务单，引擎不主动开扫  
-- 没有来源与置信度，结论不进简报  
-- 没有行动建议，尽量不发告警  
+**Operating rules**
 
-详情见 [白皮书](./docs/WHITEPAPER.md) 与 Issue 基线讨论。
+- No task ticket → engines do not scan on their own  
+- No source + confidence → findings do not enter the brief  
+- No suggested action → avoid noisy alerts  
 
----
-
-## 当前阶段（Research Preview）
-
-| 状态 | 说明 |
-|------|------|
-| 阶段 | 研究预览 / 实验运营 |
-| 主交付物 | 研判简报、组件专项、脱敏告警（建设中） |
-| 演示 | Dashboard（需认证）：见部署环境 |
-| 公开文档 | 白皮书、反馈、安全披露样例 |
-
-本阶段优先把 **「选题 → 分析 → 可复核结论」** 跑通，而不是追求资产数字最大化。
+See the [whitepaper](./docs/WHITEPAPER.md) and project Issues for the full product constitution.
 
 ---
 
-## 核心能力（模块）
+## Current stage: Research Preview
 
-| 模块 | 作用 |
-|------|------|
-| `fofa_client` / `trend_intelligence` | 测绘发现与热搜驱动选题 |
-| `tech_detector` / `supply_chain` | 组件指纹与供应链视角 |
-| `vuln_checker` | 漏洞匹配（疑似 / 已复验口径） |
-| `api_scanner` | API 暴露与敏感路径 |
-| `research_brain` / `dispatcher` | 研究大脑选题与任务调度 |
-| `notifier` | 告警推送（脱敏、去重、冷却） |
-| `ai_analyzer` | 辅助研判与文案，不作为唯一真相源 |
+| Item | Status |
+|------|--------|
+| Stage | Research preview / experimental operations |
+| Primary deliverables | Intelligence briefs, component reports, redacted alerts (in progress) |
+| Console | Authenticated dashboard in the deployment environment |
+| Public docs | Whitepaper, changelog, responsible-disclosure examples |
 
----
-
-## 文档索引
-
-| 文档 | 说明 |
-|------|------|
-| [docs/WHITEPAPER.md](./docs/WHITEPAPER.md) | 产品定位、用户、架构、可信度、路线图 |
-| [CHANGELOG.md](./CHANGELOG.md) | 版本与可见进展 |
-| [docs/MAINTENANCE.md](./docs/MAINTENANCE.md) | 仓库维护节奏与协作方式 |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | 如何提 Issue / 反馈 |
-| [docs/FEEDBACK_2026-08-13.md](./docs/FEEDBACK_2026-08-13.md) | 早期 Dashboard 反馈 |
-| [docs/design/](./docs/design/) | UI / 流程示意 |
+Priority is a closed loop of **topic selection → analysis → verifiable conclusions**, not maximizing raw asset counts.
 
 ---
 
-## 安全研究与披露示例
+## Core modules
 
-我们对热门开源组件的**公网错误配置 / API 凭据暴露**做责任披露（只读观测、密钥脱敏）。  
-示例跟踪： [Issue #11 DeepTutor settings 未认证泄露 LLM Key](https://github.com/tajleonbennis-maker/software_chian/issues/11)
-
-**口径：** 疑似 ≠ 已复验；测绘样本 ≠「全网真相」。对外表述使用固定模板（见白皮书）。
-
----
-
-## 快速了解（非完整安装手册）
-
-1. 阅读 [白皮书](./docs/WHITEPAPER.md) 理解目标与边界  
-2. 浏览 Issues 中的产品基线与路线讨论  
-3. 本地运行依赖环境变量与部署单元（见 `.env.example`、`deploy/`）  
-4. **仅对授权目标**开展探测；禁止未授权扫描  
-
-> 完整一键安装与对外 SaaS 不在当前预览范围；欢迎先通过 Issue 交流场景。
-
----
-
-## 技术栈
-
-Python · Flask / Gunicorn · Worker 分布式执行 · Web Dashboard · 测绘与指纹流水线
-
----
-
-## 安全与合规（必读）
-
-- 仅限**合法授权**的安全评估与研究  
-- 禁止未授权扫描、利用与攻击教学用途  
-- 凭据默认**脱敏**展示；完整访问需鉴权与审计  
-- 公开材料不提供可用密钥或利用武器化细节  
-
----
-
-## 路线图（摘要）
-
-| 优先级 | 目标 |
+| Module | Role |
 |--------|------|
-| P0 | 每日简报闭环、告警达人、口径一致、详情可信字段 |
-| P1 | 热门组件专项（如 Dify）、可复核证据包、上游责任披露 |
-| P2 | 轻量 SBOM、凭据加固、状态机、可选验证层 |
+| `fofa_client` / `trend_intelligence` | Mapping discovery & trend-driven research queue |
+| `tech_detector` / `supply_chain` | Component fingerprinting & supply-chain view |
+| `vuln_checker` | Vulnerability matching (suspected / verified) |
+| `api_scanner` | API exposure & sensitive path discovery |
+| `research_brain` / `dispatcher` | Research planning & task dispatch |
+| `notifier` | Alerts with redaction, dedup, and cooldown |
+| `ai_analyzer` | Assistive analysis—**not** the sole source of truth |
 
 ---
 
-## 联系与协作
+## Documentation
 
-- 产品 / 技术讨论：GitHub Issues  
-- 安全披露协作：请使用 Issue 模板「Security research」并脱敏  
-- 品牌：CyberStroll 安全情报分析团队  
+| Doc | Description |
+|-----|-------------|
+| [docs/WHITEPAPER.md](./docs/WHITEPAPER.md) | Product positioning, users, architecture, trust model, roadmap (currently Chinese; EN planned) |
+| [CHANGELOG.md](./CHANGELOG.md) | Visible progress |
+| [docs/MAINTENANCE.md](./docs/MAINTENANCE.md) | How we maintain the repo |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | How to report issues & contribute |
+| [docs/design/](./docs/design/) | UI / flow sketches |
+| [README.zh-CN.md](./README.zh-CN.md) | Full Chinese README |
 
-如果你认同「情报优于资产堆叠」，欢迎 Star、提场景、挑刺。
+---
+
+## Security research & disclosure
+
+We study **public misconfigurations and credential exposure** on popular open-source stacks using **read-only** methods and **redacted** evidence.
+
+Example tracker: [Issue #11 — DeepTutor unauthenticated `/api/v1/settings` catalog leak](https://github.com/tajleonbennis-maker/software_chian/issues/11)
+
+**Language rules**
+
+- *Suspected* ≠ *verified*  
+- A mapping sample ≠ “the whole Internet”  
+- Prefer statements like: *As of {time}, in sample set {n}, we observed …; {x} cases actively re-checked; confidence {level}.*
+
+---
+
+## Getting oriented (not a full install guide)
+
+1. Read the [whitepaper](./docs/WHITEPAPER.md) for goals and non-goals  
+2. Skim Issues for baseline / roadmap discussions  
+3. Local run needs env config and deploy units (see `.env.example`, `deploy/`)  
+4. Probe **only authorized targets**—unauthorized scanning is out of scope  
+
+> One-click public SaaS install is **not** part of this preview. Open an Issue to discuss your use case.
+
+---
+
+## Stack
+
+Python · Flask / Gunicorn · distributed workers · web dashboard · mapping & fingerprinting pipelines
+
+---
+
+## Security & compliance
+
+- Lawful, **authorized** assessment and research only  
+- No unauthorized scanning, exploitation, or attack tutorials  
+- Credentials are **redacted by default**; full access requires auth and should be audited  
+- Public materials must not include usable secrets or weaponized exploit detail  
+
+---
+
+## Roadmap (summary)
+
+| Priority | Focus |
+|----------|--------|
+| **P0** | Daily brief loop, alerts that reach humans, consistent metrics, trustworthy detail fields |
+| **P1** | Component specials (e.g. Dify), evidence packs, upstream responsible disclosure |
+| **P2** | Lightweight SBOM fields, stronger secret storage, state machine, optional validation layer |
+
+---
+
+## Contact
+
+- Product & engineering: GitHub Issues  
+- Security reports: use the **Security research** issue template; redact secrets  
+- Team: **CyberStroll Security Intelligence**  
+
+If you believe **intelligence beats asset hoarding**, star the repo, share scenarios, and challenge our methodology.
