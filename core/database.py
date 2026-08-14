@@ -180,6 +180,31 @@ class ScanDatabase:
                 meta_json TEXT NOT NULL DEFAULT ''
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_brain_events_ts ON brain_events(ts DESC)")
+            db.execute("""CREATE TABLE IF NOT EXISTS threat_intel (
+                cve_id TEXT PRIMARY KEY,
+                component TEXT NOT NULL DEFAULT '',
+                vendor TEXT NOT NULL DEFAULT '',
+                product TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                date_added TEXT NOT NULL DEFAULT '',
+                due_date TEXT NOT NULL DEFAULT '',
+                known_ransomware INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'cisa-kev',
+                first_seen REAL NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_threat_component ON threat_intel(component)")
+            db.execute("""CREATE TABLE IF NOT EXISTS code_audits (
+                audit_id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                repo_path TEXT NOT NULL DEFAULT '',
+                files_scanned INTEGER NOT NULL DEFAULT 0,
+                files_with_danger INTEGER NOT NULL DEFAULT 0,
+                risk_level TEXT NOT NULL DEFAULT 'unknown',
+                summary TEXT NOT NULL DEFAULT '',
+                report_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_audits_repo ON code_audits(repo)")
             asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
             for name, definition in (
                 ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -806,6 +831,77 @@ class ScanDatabase:
                 d["meta"] = json.loads(d.pop("meta_json") or "{}")
             except Exception:
                 d["meta"] = {}
+            out.append(d)
+        return out
+
+    # ============================================================
+    # 攻击情报 threat_intel（CISA KEV，Issue #10 目标 3）
+    # ============================================================
+    def upsert_threat_intel(self, item: Dict[str, Any]):
+        """写入一条 KEV 攻击情报（按 cve_id 幂等）"""
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT OR IGNORE INTO threat_intel
+                (cve_id, component, vendor, product, name, date_added, due_date,
+                 known_ransomware, source, first_seen)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (item.get("cve_id", ""), item.get("component", ""), item.get("vendor", ""),
+                 item.get("product", ""), item.get("name", ""), item.get("date_added", ""),
+                 item.get("due_date", ""), int(bool(item.get("known_ransomware"))),
+                 item.get("source", "cisa-kev"), time.time()))
+
+    def threat_intel_for_component(self, component: str) -> Dict[str, Any]:
+        """查询某组件的 KEV 攻击情报"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM threat_intel WHERE component=? ORDER BY date_added DESC", (component,)).fetchall()
+            ransomware = db.execute(
+                "SELECT COUNT(*) c FROM threat_intel WHERE component=? AND known_ransomware=1",
+                (component,)).fetchone()["c"]
+        items = [dict(r) for r in rows]
+        return {"total": len(items), "ransomware": ransomware, "items": items}
+
+    def threat_intel_overview(self) -> Dict[str, Any]:
+        """攻击情报概览：按组件统计 KEV 命中数"""
+        with self._connect() as db:
+            total = db.execute("SELECT COUNT(*) c FROM threat_intel").fetchone()["c"]
+            by_component = dict(db.execute(
+                "SELECT component, COUNT(*) c FROM threat_intel GROUP BY component ORDER BY c DESC").fetchall())
+            ransomware_total = db.execute(
+                "SELECT COUNT(*) c FROM threat_intel WHERE known_ransomware=1").fetchone()["c"]
+            last = db.execute("SELECT MAX(first_seen) m FROM threat_intel").fetchone()["m"]
+        return {"total": total, "ransomware_total": ransomware_total,
+                "last_sync": last, "by_component": by_component}
+
+    # ============================================================
+    # 代码审计 code_audits（Issue #10 目标 1/6）
+    # ============================================================
+    def save_code_audit(self, report: Dict[str, Any]):
+        """保存代码审计结果（按 repo 幂等）"""
+        audit_id = hashlib.md5((report.get("repo") or "").encode()).hexdigest()
+        ai = report.get("ai_report") or {}
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT OR REPLACE INTO code_audits
+                (audit_id, repo, repo_path, files_scanned, files_with_danger,
+                 risk_level, summary, report_json, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (audit_id, report.get("repo", ""), report.get("repo_path", ""),
+                 report.get("files_scanned", 0), report.get("files_with_danger", 0),
+                 ai.get("risk_level", "unknown") if isinstance(ai, dict) else "unknown",
+                 (ai.get("summary", "") if isinstance(ai, dict) else ""),
+                 json.dumps(report, ensure_ascii=False), time.time()))
+
+    def list_code_audits(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """查询代码审计记录"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM code_audits ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["report"] = json.loads(d.pop("report_json"))
+            except Exception:
+                d["report"] = {}
             out.append(d)
         return out
 
