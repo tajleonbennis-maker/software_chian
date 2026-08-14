@@ -364,7 +364,8 @@ def finish_cancelled_task(task_id: str):
 
 
 def analyze_asset(asset: Asset, scan_api: bool, online_query: bool,
-                  vuln_checker: VulnChecker, api_scanner: APIScanner) -> Dict[str, Any]:
+                  vuln_checker: VulnChecker, api_scanner: APIScanner,
+                  scan_exposure: bool = None) -> Dict[str, Any]:
     """对单个资产执行完整的安全分析
 
     分析流程：
@@ -373,6 +374,7 @@ def analyze_asset(asset: Asset, scan_api: bool, online_query: bool,
     3. 漏洞检查
     4. 利用方式查找
     5. API 安全扫描（可选）
+    6. 前端暴露面发现 / SK 检测（可独立于 API 扫描执行）
 
     Args:
         asset: 资产对象
@@ -380,10 +382,15 @@ def analyze_asset(asset: Asset, scan_api: bool, online_query: bool,
         online_query: 是否在线查询 NVD/OSV（已通过 vuln_checker 配置）
         vuln_checker: 漏洞检查器实例
         api_scanner: API 扫描器实例
+        scan_exposure: 是否执行前端暴露面发现（含 SK 检测）。
+            默认 None → 跟随 scan_api；显式 True 时即使不扫 API 也做 SK 检测
+            （Issue 修复：真实部署即使确认未通过，也应检测前端泄露的密钥）。
 
     Returns:
         单个资产的完整分析结果字典
     """
+    if scan_exposure is None:
+        scan_exposure = scan_api
     # 步骤 1：技术指纹检测
     technologies = tech_detector.detect_from_fofa(asset)
     # FOFA provides discovery metadata; actively inspect the authorized target to
@@ -426,6 +433,8 @@ def analyze_asset(asset: Asset, scan_api: bool, online_query: bool,
                 api_report = api_scanner.generate_report(asset, api_endpoints)
         except Exception as e:
             logger.warning("资产 %s 的 API 扫描失败: %s", asset.url, e)
+    # 步骤 6：前端暴露面发现 / SK 检测（可独立于 API 扫描执行）
+    if scan_exposure:
         try:
             exposure_discovery = FrontendExposureDiscovery(timeout=Config.SCAN_TIMEOUT)
             exposure_findings = exposure_discovery.discover(asset.url)
@@ -461,12 +470,21 @@ def analyze_asset(asset: Asset, scan_api: bool, online_query: bool,
 
 
 def analyze_research_candidate(asset_data: Dict[str, Any], full: bool = True) -> Dict[str, Any]:
-    """Bounded L1/L2 analysis used by the autonomous research engine."""
+    """Bounded L1/L2 analysis used by the autonomous research engine.
+
+    - full=True: 完整分析（API 扫描 + 前端暴露面 + SK 检测）
+    - full=False: 轻量确认分析，但**仍执行前端暴露面发现（含 SK 检测）**——
+      避免真实部署因确认门槛被拒后从未做 SK 检测（Issue 修复：DeepTutor 大量
+      部署通过前端 JS 泄露密钥，必须对所有资产做暴露面检测）。
+    """
     allowed = {key: asset_data.get(key) for key in Asset.__dataclass_fields__}
     asset = Asset(**allowed)
     checker = VulnChecker(enable_nvd=False, enable_osv=False, timeout=Config.SCAN_TIMEOUT)
     scanner = APIScanner(timeout=Config.SCAN_TIMEOUT, verify_ssl=False)
+    # light 模式也做暴露面发现（含 SK/敏感字段检测），仅跳过完整 API 扫描
+    light_scan = False if full else True
     return analyze_asset(asset, scan_api=full, online_query=False,
+                         scan_exposure=light_scan or full,
                          vuln_checker=checker, api_scanner=scanner)
 
 
@@ -482,15 +500,17 @@ def probe_research_project(project_slug: str, asset_data: Dict[str, Any]) -> Dic
     base = (asset_data.get("url") or "").rstrip("/")
     observations = []
     aliases = project_slug.replace("-", " ").split()
-    for path in paths[:2]:
+    for path in paths[:3]:
         try:
-            response = requests.get(base + path, timeout=min(5, Config.SCAN_TIMEOUT),
+            response = requests.get(base + path, timeout=min(6, Config.SCAN_TIMEOUT),
                                     verify=False, allow_redirects=False,
                                     headers={"User-Agent": "DefensiveResearchIdentityProbe/1.0"})
             body = response.text[:4096].lower()
             content_type = response.headers.get("Content-Type", "").lower()
+            # 放宽匹配：JSON 响应即算命中（部署常自定义品牌名，不能要求正文含项目名）
             matched = response.status_code < 400 and (
-                "json" in content_type or any(alias in body for alias in aliases)
+                "json" in content_type or response.status_code == 200
+                or any(alias in body for alias in aliases)
             )
             observations.append({"path": path, "status_code": response.status_code,
                                  "matched": matched})
@@ -2199,6 +2219,65 @@ def api_leaks():
 def api_leaks_stats():
     """凭据泄露统计"""
     return jsonify(scan_database.credential_leak_stats())
+
+
+@app.route("/api/leaks/verify", methods=["POST"])
+def api_leaks_verify():
+    """批量验证泄露 key 有效性（只读 /v1/models 请求，不触发计费调用）。
+
+    Body: {"leak_ids": ["..."]}（可选，不传则验证全部未验证的）
+    """
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    leak_ids = payload.get("leak_ids") or []
+    from core.key_verifier import verify_leaks
+    scan_database.brain_event(event_type="action", action="密钥有效性验证",
+                              detail=f"验证 {len(leak_ids) or '全部'} 个泄露 key",
+                              reason="只读 /v1/models 探测，判定密钥是否仍有效")
+    result = verify_leaks(scan_database, leak_ids=leak_ids, limit=100)
+    scan_database.brain_event(event_type="result", action="密钥验证完成",
+                              detail=f"有效 {result['valid']} · 失效 {result['invalid']} · 无法判定 {result['error']}",
+                              reason="OpenAI 兼容 /v1/models 只读探测",
+                              meta={"valid": result["valid"], "invalid": result["invalid"],
+                                    "error": result["error"]})
+    return jsonify(result)
+
+
+@app.route("/api/leaks/research", methods=["POST"])
+def api_leaks_research():
+    """深度研究泄露（Leak Researcher）：从已知泄露学习指纹 → 批量回扫同项目资产 → 入库。
+
+    异步执行：立即返回，后台线程探测（100 资产 × 6 路径约 3-5 分钟）。
+    Body: {"project": "deeptutor", "asset_url": "...", "max_assets": 50}
+    """
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    project = (payload.get("project") or "").strip()
+    asset_url = (payload.get("asset_url") or "").strip()
+    max_assets = min(int(payload.get("max_assets", 50)), 200)
+
+    def _run():
+        try:
+            from core.leak_researcher import research_leaks
+            result = research_leaks(scan_database, project=project, asset_url=asset_url,
+                                    max_assets=max_assets)
+            scan_database.brain_event(event_type="result", action="泄露研究完成",
+                                      detail=f"探测 {result['probed']} 资产 · 新增 {result['found']} 泄露",
+                                      reason="模式指纹 + 密钥正则 + 敏感字段启发式",
+                                      meta={"found": result["found"], "probed": result["probed"]})
+        except Exception as exc:
+            logger.warning("泄露深度研究失败: %s", exc)
+            scan_database.brain_event(event_type="error", action="泄露研究失败",
+                                      detail=f"{project or asset_url}: {str(exc)[:100]}")
+
+    scan_database.brain_event(event_type="action", action="泄露深度研究",
+                              detail=f"回扫 {project or asset_url}",
+                              reason="从已知泄露学习模式，批量发现同类泄露（用户诉求：非简单模式匹配）",
+                              meta={"project": project, "asset_url": asset_url})
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True, "status": "running", "project": project, "asset_url": asset_url})
 
 
 @app.route("/api/analytics")
