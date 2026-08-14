@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>供应链 · API 安全态势感知大屏</title>
+<style>
+:root {
+  --bg: #070b14;
+  --panel: rgba(16, 24, 42, 0.85);
+  --panel-border: rgba(64, 128, 255, 0.25);
+  --text: #dce6f5;
+  --text-dim: #7d8db0;
+  --blue: #2f6bff;
+  --cyan: #22d3ee;
+  --green: #34d399;
+  --orange: #f59e0b;
+  --red: #ef4444;
+  --purple: #a78bfa;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'PingFang SC','Microsoft YaHei',monospace;
+  overflow-x: hidden;
+}
+/* 科技感网格背景 */
+body::before {
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background:
+    radial-gradient(ellipse at 20% 20%, rgba(47,107,255,0.08), transparent 50%),
+    radial-gradient(ellipse at 80% 60%, rgba(34,211,238,0.06), transparent 50%),
+    linear-gradient(rgba(47,107,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(47,107,255,0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+}
+.wrap { position:relative; z-index:1; padding:14px 18px; }
+
+/* 顶部标题 */
+.header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:10px 18px; margin-bottom:14px;
+  background: linear-gradient(90deg, rgba(47,107,255,0.12), transparent);
+  border:1px solid var(--panel-border); border-radius:8px;
+}
+.header .title { font-size:24px; font-weight:700; letter-spacing:3px;
+  background: linear-gradient(90deg, #fff, var(--cyan)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+.header .sub { font-size:12px; color:var(--text-dim); margin-top:2px; letter-spacing:1px; }
+.header .right { display:flex; align-items:center; gap:16px; font-size:13px; }
+.risk-pill { padding:6px 16px; border-radius:20px; font-weight:700; font-size:14px; border:1px solid; }
+.risk-LOW{color:var(--green);border-color:var(--green);} .risk-MEDIUM{color:var(--orange);border-color:var(--orange);}
+.risk-HIGH{color:var(--orange);border-color:var(--orange);} .risk-CRITICAL{color:var(--red);border-color:var(--red);}
+
+/* 大屏网格 */
+.grid { display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; }
+.panel {
+  background: var(--panel); border:1px solid var(--panel-border);
+  border-radius:8px; padding:12px 14px; position:relative;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+.panel::before { content:''; position:absolute; top:0; left:0; width:100%; height:2px;
+  background: linear-gradient(90deg, var(--blue), var(--cyan), transparent); opacity:0.5; border-radius:8px 8px 0 0; }
+.panel h3 { font-size:13px; color:var(--cyan); letter-spacing:2px; margin-bottom:10px;
+  display:flex; align-items:center; gap:6px; }
+.panel h3::before { content:''; width:4px; height:14px; background:var(--cyan); border-radius:2px; }
+.col-3 { grid-column: span 3; } .col-4 { grid-column: span 4; }
+.col-6 { grid-column: span 6; } .col-12 { grid-column: span 12; }
+
+/* KPI */
+.kpis { display:grid; grid-template-columns: repeat(6, 1fr); gap:12px; margin-bottom:12px; }
+.kpi { background:var(--panel); border:1px solid var(--panel-border); border-radius:8px;
+  padding:12px; text-align:center; position:relative; overflow:hidden; }
+.kpi .num { font-size:28px; font-weight:800; font-family:monospace; }
+.kpi .lbl { font-size:11px; color:var(--text-dim); margin-top:4px; letter-spacing:1px; }
+.kpi .glow { position:absolute; bottom:-20px; left:50%; transform:translateX(-50%); width:60%; height:40px;
+  border-radius:50%; filter:blur(18px); opacity:0.25; }
+.kpi.c-blue .num{color:var(--blue)} .kpi.c-blue .glow{background:var(--blue)}
+.kpi.c-cyan .num{color:var(--cyan)} .kpi.c-cyan .glow{background:var(--cyan)}
+.kpi.c-green .num{color:var(--green)} .kpi.c-green .glow{background:var(--green)}
+.kpi.c-orange .num{color:var(--orange)} .kpi.c-orange .glow{background:var(--orange)}
+.kpi.c-red .num{color:var(--red)} .kpi.c-red .glow{background:var(--red)}
+.kpi.c-purple .num{color:var(--purple)} .kpi.c-purple .glow{background:var(--purple)}
+
+/* 条形图 */
+.bars { display:flex; flex-direction:column; gap:7px; }
+.bar-row { display:flex; align-items:center; gap:8px; font-size:12px; }
+.bar-label { width:88px; color:var(--text-dim); flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.bar-track { flex:1; height:12px; background:rgba(255,255,255,0.05); border-radius:3px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:3px; transition:width 1s ease; }
+.bar-num { width:34px; text-align:right; font-family:monospace; color:var(--text); }
+
+/* 圆环 */
+.rings { display:flex; justify-content:center; gap:22px; padding:6px 0; }
+.ring { text-align:center; }
+.ring svg { transform:rotate(-90deg); }
+.ring .ring-label { font-size:11px; color:var(--text-dim); margin-top:4px; }
+
+/* 大脑活动流 */
+.stream { max-height:300px; overflow-y:auto; display:flex; flex-direction:column; gap:7px; padding-right:4px; }
+.stream::-webkit-scrollbar { width:4px; } .stream::-webkit-scrollbar-thumb { background:rgba(64,128,255,0.3); border-radius:2px; }
+.stream-item { border-left:3px solid var(--blue); padding:6px 10px; background:rgba(255,255,255,0.02); border-radius:0 4px 4px 0; }
+.stream-item .t { font-size:11px; color:var(--text-dim); }
+.stream-item .d { font-size:12px; margin-top:2px; }
+.stream-item.think{border-color:var(--purple)} .stream-item.decide{border-color:var(--cyan)}
+.stream-item.result{border-color:var(--green)} .stream-item.sync{border-color:var(--blue)}
+.stream-item.error{border-color:var(--red)} .stream-item.warn{border-color:var(--orange)}
+.stream-item .ai { color:var(--purple); font-size:11px; margin-top:2px; font-style:italic; }
+
+/* 节点 */
+.nodes { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+.node { border:1px solid var(--panel-border); border-radius:6px; padding:8px 10px; font-size:12px; }
+.node .ip { font-family:monospace; color:var(--cyan); }
+.node .st { float:right; padding:1px 8px; border-radius:10px; font-size:10px; }
+.node .online{background:rgba(52,211,153,0.15);color:var(--green)}
+.node .offline{background:rgba(239,68,68,0.15);color:var(--red)}
+
+/* 底部状态 */
+.footer { margin-top:12px; padding:8px 14px; font-size:11px; color:var(--text-dim);
+  border:1px solid var(--panel-border); border-radius:6px; display:flex; justify-content:space-between; }
+
+/* 滚动数字动画 */
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.loading { animation: pulse 1.2s infinite; }
+
+@media (max-width:1400px){ .kpis{grid-template-columns:repeat(3,1fr)} .col-3{grid-column:span 6} .col-4{grid-column:span 6} .col-6{grid-column:span 12} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 顶部 -->
+  <div class="header">
+    <div>
+      <div class="title">供应链 · API 安全态势感知</div>
+      <div class="sub">CYBER SITUATIONAL AWARENESS · 测绘数据驱动 · 实时研判</div>
+    </div>
+    <div class="right">
+      <span id="global-risk" class="risk-pill risk-LOW">整体风险：--</span>
+      <span id="clock" style="font-family:monospace;font-size:20px;color:var(--cyan)">--:--:--</span>
+      <span id="date-str" style="color:var(--text-dim)"></span>
+    </div>
+  </div>
+
+  <!-- KPI 行 -->
+  <div class="kpis">
+    <div class="kpi c-blue"><div class="num" id="k-assets">--</div><div class="lbl">测绘资产</div><div class="glow"></div></div>
+    <div class="kpi c-cyan"><div class="num" id="k-vulns">--</div><div class="lbl">漏洞观测</div><div class="glow"></div></div>
+    <div class="kpi c-orange"><div class="num" id="k-high">--</div><div class="lbl">高危 (CRIT+HIGH)</div><div class="glow"></div></div>
+    <div class="kpi c-green"><div class="num" id="k-api">--</div><div class="lbl">API 暴露</div><div class="glow"></div></div>
+    <div class="kpi c-purple"><div class="num" id="k-kev">--</div><div class="lbl">在野利用 (KEV)</div><div class="glow"></div></div>
+    <div class="kpi c-red"><div class="num" id="k-sk">--</div><div class="lbl">凭据泄露</div><div class="glow"></div></div>
+  </div>
+
+  <div class="grid">
+    <!-- 左：攻击情报 -->
+    <div class="panel col-3">
+      <h3>🔴 在野攻击情报</h3>
+      <div id="threat-bars" class="bars"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+
+    <!-- 中：风险分布 -->
+    <div class="panel col-3">
+      <h3>漏洞风险分布</h3>
+      <div id="risk-rings" class="rings"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+
+    <!-- 中：热点组件 -->
+    <div class="panel col-3">
+      <h3>🛰️ 热点组件暴露</h3>
+      <div id="comp-bars" class="bars"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+
+    <!-- 右：大脑活动流 -->
+    <div class="panel col-3">
+      <h3>🧠 大脑活动流</h3>
+      <div id="stream" class="stream"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+
+    <!-- 第二行：节点 + 供应链健康 -->
+    <div class="panel col-4">
+      <h3>🖥️ 节点状态</h3>
+      <div id="nodes" class="nodes"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+
+    <div class="panel col-4">
+      <h3>🔗 供应链健康</h3>
+      <div id="supply" style="font-size:12px"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+
+    <div class="panel col-4">
+      <h3>⚡ 研究项目态势</h3>
+      <div id="projects" style="font-size:12px"><div class="loading" style="color:var(--text-dim)">加载中...</div></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>供应链 · API 安全情报系统 · 态势感知大屏</span>
+    <span>数据每 10 秒自动刷新 · <span id="last-refresh">-</span></span>
+    <span><a href="/dashboard" style="color:var(--cyan);text-decoration:none">← 进入工作台</a></span>
+  </div>
+</div>
+
+<script>
+const API = window.location.pathname.startsWith('/sc/') ? '/sc' : '';
+
+async function j(path){ const r=await fetch(API+path,{headers:{'Content-Type':'application/json'}}); return r.json(); }
+
+/* 时钟 */
+function tick(){
+  const d=new Date();
+  document.getElementById('clock').textContent = d.toLocaleTimeString('zh-CN',{hour12:false});
+  document.getElementById('date-str').textContent = d.toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',weekday:'long'});
+}
+
+/* 条形图 */
+function renderBars(elId, items, colorFn){
+  const el=document.getElementById(elId);
+  if(!items.length){ el.innerHTML='<div style="color:var(--text-dim)">暂无数据</div>'; return; }
+  const max=items[0][1];
+  el.innerHTML = items.map(([name,n])=>{
+    const pct=Math.max(n/max*100,3);
+    const c=colorFn(n);
+    return `<div class="bar-row">
+      <span class="bar-label" title="${name}">${name}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${c};box-shadow:0 0 8px ${c}66"></div></div>
+      <span class="bar-num">${n}</span>
+    </div>`;
+  }).join('');
+}
+const sevColor = n => n>=30?'var(--red)':n>=10?'var(--orange)':'var(--cyan)';
+const compColor = n => n>=100?'var(--red)':n>=50?'var(--orange)':'var(--cyan)';
+
+/* 圆环 */
+function renderRings(elId, data){
+  const el=document.getElementById(elId);
+  const total=data.reduce((a,b)=>a+b[1],0)||1;
+  const colors={CRITICAL:'var(--red)',HIGH:'var(--orange)',MEDIUM:'var(--blue)',LOW:'var(--green)',INFO:'var(--text-dim)'};
+  el.innerHTML = data.map(([k,v])=>{
+    const pct=Math.round(v/total*100);
+    const r=34, c=2*Math.PI*r;
+    return `<div class="ring">
+      <svg width="80" height="80" viewBox="0 0 80 80">
+        <circle cx="40" cy="40" r="${r}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8"/>
+        <circle cx="40" cy="40" r="${r}" fill="none" stroke="${colors[k]||'var(--cyan)'}" stroke-width="8"
+          stroke-dasharray="${c*pct/100} ${c}" stroke-linecap="round"/>
+      </svg>
+      <div style="position:relative;margin-top:-52px;font-size:16px;font-weight:700">${v}</div>
+      <div class="ring-label">${k}</div>
+    </div>`;
+  }).join('');
+}
+
+/* 大脑活动流 */
+async function loadStream(){
+  try{
+    const d=await j('/api/brain/events?limit=14');
+    const ev=d.events||[];
+    const el=document.getElementById('stream');
+    if(!ev.length){ el.innerHTML='<div style="color:var(--text-dim)">暂无活动</div>'; return; }
+    el.innerHTML=ev.map(e=>{
+      const t=new Date((e.ts||0)*1000).toLocaleTimeString('zh-CN',{hour12:false});
+      const ai=e.ai_thought?`<div class="ai">🤖 ${e.ai_thought}</div>`:'';
+      const reason=e.reason?`<div style="color:var(--text-dim);font-size:11px">💬 ${e.reason}</div>`:'';
+      return `<div class="stream-item ${e.event_type||''}">
+        <div class="t">${t} · ${e.action||''}${e.project?` · <span style="color:var(--cyan)">${e.project}</span>`:''}</div>
+        <div class="d">${e.detail||''}</div>${reason}${ai}</div>`;
+    }).join('');
+  }catch(e){ document.getElementById('stream').innerHTML='<div style="color:var(--text-dim)">加载失败</div>'; }
+}
+
+/* 节点 */
+async function loadNodes(){
+  try{
+    const d=await j('/api/monitor/overview');
+    const s=d.summary||{};
+    const nodes=d.nodes||d.node_status||[];
+    const el=document.getElementById('nodes');
+    el.innerHTML = (Array.isArray(nodes)?nodes:[]).slice(0,6).map(n=>`
+      <div class="node">
+        <span class="ip">${n.ip||n.host||'?'}</span>
+        <span class="st ${n.status==='online'||n.online?'online':'offline'}">${n.status||(n.online?'online':'offline')}</span>
+        <div style="color:var(--text-dim);margin-top:2px">${n.role||n.node_type||n.label||''}</div>
+      </div>`).join('') || '<div style="color:var(--text-dim)">暂无节点</div>';
+  }catch(e){ document.getElementById('nodes').innerHTML='<div style="color:var(--text-dim)">加载失败</div>'; }
+}
+
+/* 研究项目 */
+async function loadProjects(){
+  try{
+    const d=await j('/api/research/overview');
+    const ps=(d.projects||[]).slice(0,7);
+    const el=document.getElementById('projects');
+    if(!ps.length){ el.innerHTML='<div style="color:var(--text-dim)">暂无项目</div>'; return; }
+    el.innerHTML=ps.map(p=>`
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:12px">
+        <span style="color:var(--cyan)">${p.name||p.slug}</span>
+        <span style="color:var(--text-dim)">资产 ${p.asset_count||p.discovered_count||0} · 已分析 ${p.analyzed_count||0}</span>
+      </div>`).join('');
+  }catch(e){ document.getElementById('projects').innerHTML='<div style="color:var(--text-dim)">加载失败</div>'; }
+}
+
+/* 供应链健康 */
+async function loadSupply(){
+  try{
+    const d=await j('/api/supply-chain/overview');
+    const el=document.getElementById('supply');
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+        <span style="color:var(--text-dim)">已分析资产</span><span style="color:var(--cyan);font-family:monospace">${d.analyzed_assets||0} / ${d.total_assets||0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+        <span style="color:var(--text-dim)">条件命中漏洞</span><span style="color:var(--orange);font-family:monospace">${d.vuln_condition_matched||0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+        <span style="color:var(--text-dim)">已复验漏洞</span><span style="color:var(--green);font-family:monospace">${d.vuln_verified||0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
+        <span style="color:var(--text-dim)">平均组件/资产</span><span style="color:var(--cyan);font-family:monospace">${d.avg_components||0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0">
+        <span style="color:var(--text-dim)">研判卡</span><span style="color:var(--purple);font-family:monospace">${(d.cards_total||0)}</span></div>`;
+  }catch(e){ document.getElementById('supply').innerHTML='<div style="color:var(--text-dim)">加载失败</div>'; }
+}
+
+/* 主加载 */
+async function loadAll(){
+  try{
+    const [sc, ti, leaks, mon] = await Promise.all([
+      j('/api/supply-chain/overview'), j('/api/threat-intel'), j('/api/leaks/stats').catch(()=>({total:0})), j('/api/monitor/overview')
+    ]);
+    // KPI
+    document.getElementById('k-assets').textContent = sc.total_assets||0;
+    document.getElementById('k-vulns').textContent = sc.vuln_total||0;
+    document.getElementById('k-high').textContent = (sc.risk_buckets?.CRITICAL||0)+(sc.risk_buckets?.HIGH||0);
+    document.getElementById('k-api').textContent = sc.api_exposed_assets||0;
+    document.getElementById('k-kev').textContent = ti.total||0;
+    document.getElementById('k-sk').textContent = leaks.total||0;
+    // 整体风险等级
+    const crit=(sc.risk_buckets?.CRITICAL||0), high=(sc.risk_buckets?.HIGH||0);
+    let lvl='LOW';
+    if(ti.ransomware_total>0||crit>20) lvl='CRITICAL'; else if(crit>0||high>30) lvl='HIGH'; else if(high>0||ti.total>0) lvl='MEDIUM';
+    const pill=document.getElementById('global-risk');
+    pill.textContent = '整体风险：'+lvl;
+    pill.className = 'risk-pill risk-'+lvl;
+    // 攻击情报
+    const bc=ti.by_component||{};
+    renderBars('threat-bars', Object.entries(bc).sort((a,b)=>b[1]-a[1]).slice(0,9), sevColor);
+    // 风险分布
+    const rb=sc.risk_buckets||{};
+    renderRings('risk-rings', [['CRITICAL',rb.CRITICAL||0],['HIGH',rb.HIGH||0],['MEDIUM',rb.MEDIUM||0],['LOW',rb.LOW||0]]);
+    // 热点组件
+    const comps=(sc.top_components||[]).map(c=>[c.component,c.assets]);
+    renderBars('comp-bars', comps.slice(0,8), compColor);
+    // 节点
+    const nodes=mon.nodes||mon.node_status||[];
+    const el=document.getElementById('nodes');
+    el.innerHTML=(Array.isArray(nodes)?nodes:[]).slice(0,6).map(n=>`
+      <div class="node"><span class="ip">${n.ip||n.host||'?'}</span>
+        <span class="st ${(n.status==='online'||n.online)?'online':'offline'}">${n.status||(n.online?'online':'offline')}</span>
+        <div style="color:var(--text-dim);margin-top:2px">${n.role||n.node_type||n.label||''}</div></div>`).join('')||'<div style="color:var(--text-dim)">暂无节点</div>';
+    // 供应链健康 + 项目
+    loadSupply();
+    loadProjects();
+    document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  }catch(e){ console.error('loadAll', e); }
+}
+
+tick(); setInterval(tick,1000);
+loadAll(); loadStream(); loadNodes();
+setInterval(loadAll, 10000);
+setInterval(loadStream, 5000);
+</script>
+</body>
+</html>
