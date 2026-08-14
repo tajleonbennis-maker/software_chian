@@ -352,10 +352,10 @@ a:hover { text-decoration: underline; }
   <!-- ===== 扫描任务 ===== -->
   <div class="view" id="view-scan">
     <div class="page-title">扫描任务</div>
-    <div class="page-desc">输入有权测试的 URL，或使用 FOFA 发现资产</div>
+    <div class="page-desc">输入有权测试的 URL，或使用测绘平台发现资产</div>
     <div class="card">
       <div class="chips" style="margin-bottom:12px">
-        <span class="chip" style="background:var(--accent-blue);color:var(--bg-primary);font-weight:600">FOFA 资产发现</span>
+        <span class="chip" style="background:var(--accent-blue);color:var(--bg-primary);font-weight:600">测绘平台资产发现</span>
         <span class="chip">手动输入 URL</span>
       </div>
       <div class="query-box">
@@ -383,7 +383,7 @@ a:hover { text-decoration: underline; }
   <!-- ===== 资产库 ===== -->
   <div class="view" id="view-assets">
     <div class="page-title">资产库</div>
-    <div class="page-desc">FoFa 风格资产列表，点击查看详情</div>
+    <div class="page-desc">测绘平台风格资产列表，点击查看详情</div>
     <div class="card">
       <div class="card-header">
         <h3>资产列表</h3>
@@ -460,7 +460,7 @@ a:hover { text-decoration: underline; }
         </div>
         <div id="project-analysis"><div class="empty-hint">加载中...</div></div>
       </div>
-      <div class="chart-card"><h3>FoFa 热搜组件</h3><div id="fofa-hot"><div class="empty-hint">加载中...</div></div></div>
+      <div class="chart-card"><h3>测绘平台热搜组件</h3><div id="fofa-hot"><div class="empty-hint">加载中...</div></div></div>
       <div class="chart-card"><h3>趋势信号</h3><div id="trend-signals"><div class="empty-hint">加载中...</div></div></div>
       <div class="chart-card"><h3>研究运行记录</h3><div id="research-runs"><div class="empty-hint">加载中...</div></div></div>
     </div>
@@ -470,13 +470,13 @@ a:hover { text-decoration: underline; }
         <div class="msg bot">你好！我是大脑控制台。可以查看节点状态、统计实验数据、下发扫描任务，或全量遍历 API 发现凭据泄露。</div>
       </div>
       <div class="chat-input">
-        <input id="chat-input" placeholder="例如：查看所有节点状态 / 用 fofa 扫描 50 个 nginx 资产 / 统计实验数据" onkeydown="if(event.key==='Enter')sendChat()">
+        <input id="chat-input" placeholder="例如：查看所有节点状态 / 用测绘平台扫描 50 个 nginx 资产 / 统计实验数据" onkeydown="if(event.key==='Enter')sendChat()">
         <button class="btn" onclick="sendChat()">发送</button>
       </div>
       <div class="chips">
         <span class="chip" onclick="quickChat('查看所有节点状态')">节点状态</span>
         <span class="chip" onclick="quickChat('统计实验数据')">数据统计</span>
-        <span class="chip" onclick="quickChat('用 fofa 扫描 50 个 nginx 资产')">fofa 扫描</span>
+        <span class="chip" onclick="quickChat('用测绘平台扫描 50 个 nginx 资产')">测绘扫描</span>
         <span class="chip" onclick="quickChat('检测漏洞')">漏洞检测</span>
         <span class="chip" onclick="quickChat('技术指纹')">技术指纹</span>
       </div>
@@ -609,7 +609,7 @@ async function loadCards() {
             <div class="hint" style="margin-top:4px">💡 ${escapeHtml(c.why_worth)}</div>
             <div class="hint" style="margin-top:4px">📋 证据：${escapeHtml(c.evidence_says)}<br>⚠️ 边界：${escapeHtml(c.evidence_limits)}</div>
             <div class="hint" style="margin-top:4px">➡️ 下一步：${escapeHtml(c.next_step)}<br>⏹️ 放弃条件：${escapeHtml(c.abort_condition)}</div>
-            ${c.fofa_query?`<div style="margin-top:6px;display:flex;gap:8px;align-items:center"><span class="hint">FOFA：</span><code class="mono" style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;font-size:12px">${escapeHtml(c.fofa_query)}</code><button class="btn-secondary" style="padding:2px 8px;font-size:11px" onclick="navigator.clipboard.writeText('${escapeHtml(c.fofa_query)}')">复制</button></div>`:''}
+            ${c.fofa_query?`<div style="margin-top:6px;display:flex;gap:8px;align-items:center"><span class="hint">测绘语法：</span><code class="mono" style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;font-size:12px">${escapeHtml(c.fofa_query)}</code><button class="btn-secondary" style="padding:2px 8px;font-size:11px" onclick="navigator.clipboard.writeText('${escapeHtml(c.fofa_query)}')">复制</button></div>`:''}
             <div class="hint" style="margin-top:4px">来源 ${escapeHtml(c.source||'')} · ${escapeHtml(c.card_type)} · ${new Date((c.last_seen||0)*1000).toLocaleString()}</div>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">${decTag}
@@ -691,7 +691,7 @@ async function loadOverview() {
           </div>
         </div>
       </div>`;
-    }).join('') || '<div class="empty-hint">暂无资产，先在对话区下发 fofa 扫描任务</div>';
+    }).join('') || '<div class="empty-hint">暂无资产，先在对话区下发 测绘扫描任务</div>';
     // 供应链健康摘要
     renderSupplyChain(sc);
   } catch(e) { document.getElementById('overview-assets').innerHTML = '<div class="empty-hint">加载失败</div>'; }
@@ -719,7 +719,7 @@ async function runScan() {
   document.getElementById('scan-status').textContent = '正在下发任务...';
   document.getElementById('scan-progress').style.width = '10%';
   document.getElementById('scan-pct').textContent = '10%';
-  const r = await api('/api/chat', 'POST', {message: '用 fofa 扫描 ' + q});
+  const r = await api('/api/chat', 'POST', {message: '用 测绘扫描 ' + q});
   document.getElementById('scan-status').textContent = r.reply || r.error || '已下发';
   document.getElementById('scan-progress').style.width = '30%';
   document.getElementById('scan-pct').textContent = '30%';
@@ -1038,7 +1038,7 @@ async function loadProjectAnalysis() {
         </div>
       </div>
       ${d.fofa_query ? `<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span class="hint">FOFA 语法：</span>
+        <span class="hint">测绘语法：</span>
         <code class="mono" style="background:var(--bg-tertiary);padding:4px 8px;border-radius:4px;border:1px solid var(--border)">${escapeHtml(d.fofa_query)}</code>
         <button class="btn-secondary" onclick="navigator.clipboard.writeText('${escapeHtml(d.fofa_query)}')">复制</button>
         <button class="btn-secondary" onclick="setSearch('${escapeHtml(d.fofa_query)}')">🔎 在扫描页使用</button>
