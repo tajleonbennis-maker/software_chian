@@ -1,47 +1,57 @@
-# 参与 CyberStroll
+# Contributing to CyberStroll
 
-感谢关注。本项目处于 **Research Preview**：欢迎反馈场景、挑刺口径、改进文档；代码贡献请先开 Issue 对齐方向。
+Thank you for your interest. This project is in **Research Preview**.  
+**Languages:** English (this file) · 中文摘要见文末 · [中文 README](./README.zh-CN.md)
 
----
-
-## 你可以直接做的事
-
-1. **Star** 仓库，便于跟踪 Release  
-2. 阅读 [白皮书](./docs/WHITEPAPER.md)，在 Issue 讨论产品边界  
-3. 提交 **缺陷 / 需求 / 安全研究**（使用 Issue 模板）  
-4. 改进文档 PR（错别字、表述、翻译）通常优先合并  
+We welcome scenario feedback, methodology critique, and documentation fixes. Please open an Issue before large code changes so we stay aligned with the “brief-first” roadmap.
 
 ---
 
-## 提 Issue 建议
+## Ways to help
 
-| 类型 | 请包含 |
-|------|--------|
-| 缺陷 | 期望行为、实际行为、环境、是否可复现 |
-| 需求 | 用户场景、验收标准、为何不是「再扫多一点」 |
-| 安全研究 | 只读方法、影响、脱敏证据、修复建议；**禁止**完整密钥 |
-
-安全相关请优先使用模板 `Security research`，并遵守责任披露习惯。
+1. **Star** the repository to follow releases  
+2. Read the [whitepaper](./docs/WHITEPAPER.md) and discuss product boundaries in Issues  
+3. File **bugs / features / security research** using the issue templates  
+4. Documentation PRs (typos, clarity, translation) are usually merged first  
 
 ---
 
-## 代码贡献
+## Issue guidelines
 
-1. 先开 Issue 说明动机，避免与「简报优先」路线冲突  
-2. 小步 PR，附上如何验证  
-3. 不引入未授权扫描默认行为  
-4. 密钥、Token 不得写入仓库  
+| Type | Please include |
+|------|----------------|
+| Bug | Expected vs actual behavior, environment, repro steps |
+| Feature | User scenario, acceptance criteria, why it is not “scan more assets” |
+| Security research | Read-only method, impact, **redacted** evidence, fix ideas; **no full secrets** |
 
----
-
-## 行为准则（简）
-
-- 专业、建设性  
-- 不分享可用于犯罪的利用细节  
-- 尊重上游项目与被观测方的合法权利  
+For security topics, use the **Security research** template and follow responsible disclosure norms.
 
 ---
 
-## 联系
+## Code contributions
 
-通过 GitHub Issues 即可。安全应急若涉及仍有效的大规模密钥泄露，请在 Issue 中说明「需要私信样本列表」，不要贴明文。
+1. Open an Issue first to agree on motivation  
+2. Prefer small PRs with verification notes  
+3. Do not add defaults that enable unauthorized scanning  
+4. Never commit API keys, tokens, or live customer secrets  
+
+---
+
+## Conduct (short)
+
+- Be professional and constructive  
+- Do not share criminal exploit detail  
+- Respect upstream projects and legal boundaries of observation targets  
+
+---
+
+## Contact
+
+GitHub Issues are enough. If a report involves still-valid large-scale key exposure, say you need a private sample list—**do not paste plaintext secrets**.
+
+---
+
+## 中文摘要
+
+本项目处于研究预览阶段。欢迎提场景、挑口径、改文档；大改代码请先开 Issue。  
+安全类反馈必须脱敏，禁止完整密钥。产品边界见 [白皮书](./docs/WHITEPAPER.md) 与 [中文 README](./README.zh-CN.md)。
