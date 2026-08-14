@@ -272,16 +272,19 @@ async function loadStream(){
 /* 节点 */
 async function loadNodes(){
   try{
-    const d=await j('/api/monitor/overview');
-    const s=d.summary||{};
-    const nodes=d.nodes||d.node_status||[];
+    const d=await j('/api/nodes/status');
+    const nodes=d.nodes||[];
     const el=document.getElementById('nodes');
-    el.innerHTML = (Array.isArray(nodes)?nodes:[]).slice(0,6).map(n=>`
-      <div class="node">
-        <span class="ip">${n.ip||n.host||'?'}</span>
-        <span class="st ${n.status==='online'||n.online?'online':'offline'}">${n.status||(n.online?'online':'offline')}</span>
-        <div style="color:var(--text-dim);margin-top:2px">${n.role||n.node_type||n.label||''}</div>
-      </div>`).join('') || '<div style="color:var(--text-dim)">暂无节点</div>';
+    if(!nodes.length){ el.innerHTML='<div style="color:var(--text-dim)">暂无节点</div>'; return; }
+    el.innerHTML = nodes.map(n=>{
+      const on = n.status==='ready';
+      return `<div class="node">
+        <span class="ip">${n.name||n.node_id}</span>
+        <span class="st ${on?'online':'offline'}">${on?'🟢 在线':'🔴 离线'}</span>
+        <div style="color:var(--text-dim);margin-top:2px;font-size:10px">${(n.url||'').replace('http://','')}</div>
+        <div style="color:var(--text-dim);margin-top:2px">${(n.capabilities||[]).join(' · ')}</div>
+      </div>`;
+    }).join('');
   }catch(e){ document.getElementById('nodes').innerHTML='<div style="color:var(--text-dim)">加载失败</div>'; }
 }
 
@@ -348,13 +351,8 @@ async function loadAll(){
     // 热点组件
     const comps=(sc.top_components||[]).map(c=>[c.component,c.assets]);
     renderBars('comp-bars', comps.slice(0,8), compColor);
-    // 节点
-    const nodes=mon.nodes||mon.node_status||[];
-    const el=document.getElementById('nodes');
-    el.innerHTML=(Array.isArray(nodes)?nodes:[]).slice(0,6).map(n=>`
-      <div class="node"><span class="ip">${n.ip||n.host||'?'}</span>
-        <span class="st ${(n.status==='online'||n.online)?'online':'offline'}">${n.status||(n.online?'online':'offline')}</span>
-        <div style="color:var(--text-dim);margin-top:2px">${n.role||n.node_type||n.label||''}</div></div>`).join('')||'<div style="color:var(--text-dim)">暂无节点</div>';
+    // 节点（用 /api/nodes/status 显示健康状态）
+    loadNodes();
     // 供应链健康 + 项目
     loadSupply();
     loadProjects();
