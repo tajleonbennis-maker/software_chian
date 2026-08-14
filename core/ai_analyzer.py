@@ -189,6 +189,14 @@ class AIAnalyzer:
                 if not choices:
                     raise RuntimeError("DeepSeek API 返回空 choices")
                 content = choices[0].get("message", {}).get("content", "")
+                finish_reason = choices[0].get("finish_reason", "")
+                # 推理模型：content 为空但 finish_reason=length → reasoning 吃满 token，
+                # 自动放大 max_tokens 重试一次（仅一次）
+                if not content and finish_reason == "length" and max_tokens < 8000:
+                    logger.warning("AI 返回 content 为空（reasoning 占满 max_tokens=%d），放大重试", max_tokens)
+                    max_tokens = min(max_tokens * 4, 8000)
+                    if attempt < self.MAX_RETRIES:
+                        continue
                 if not content:
                     raise RuntimeError("DeepSeek API 返回空 content")
                 return content.strip()
