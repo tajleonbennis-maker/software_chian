@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Product whitepaper
+    url: https://github.com/tajleonbennis-maker/software_chian/blob/main/docs/WHITEPAPER.md
+    about: 先读白皮书，对齐产品边界与可信度口径
+  - name: Changelog
+    url: https://github.com/tajleonbennis-maker/software_chian/blob/main/CHANGELOG.md
+    about: 查看研究预览版进展
