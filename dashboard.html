@@ -523,7 +523,7 @@ async function loadOverview() {
       api('/api/supply-chain/overview')
     ]);
     document.getElementById('kpi-assets').textContent = (sc.total_assets||0) + ' 资产';
-    document.getElementById('kpi-vulns').textContent = (sc.vuln_total||0) + ' 漏洞';
+    document.getElementById('kpi-vulns').innerHTML = (sc.vuln_total||0) + ' 疑似<span class="hint" style="font-size:12px">/已复验 ' + (sc.vuln_verified||0) + '</span>';
     document.getElementById('kpi-leaks').textContent = leaks.total || 0;
     document.getElementById('kpi-nodes').textContent = (mon.summary?.online_nodes||0) + '/' + (mon.summary?.total_nodes||0);
     const el = document.getElementById('overview-assets');
@@ -557,6 +557,7 @@ function renderSupplyChain(sc) {
   const critical = (rb.CRITICAL||0) + (rb.HIGH||0);
   el.innerHTML = `
     <div class="metric-row"><span class="k">平均组件数 / 资产</span><span class="v">${sc.avg_components||0}</span></div>
+    <div class="metric-row"><span class="k">漏洞口径</span><span class="v">疑似 ${sc.vuln_suspected||0} · 已复验 <span style="color:${sc.vuln_verified?'var(--accent-green)':'var(--text-secondary)'}">${sc.vuln_verified||0}</span>${sc.verified_assets?'（${sc.verified_assets} 资产）':''}</span></div>
     <div class="metric-row"><span class="k">高危+严重资产</span><span class="v" style="color:${critical?'var(--accent-red)':'var(--accent-green)'}">${critical} / ${total}</span></div>
     <div class="metric-row"><span class="k">API 暴露率</span><span class="v">${sc.api_exposed_assets||0} 资产 · ${Math.round((sc.api_exposure_rate||0)*100)}%</span></div>
     <div class="metric-row"><span class="k">风险分布</span><span class="v">${Object.entries(rb).filter(([k])=>k!=='INFO').map(([k,v])=>`${k}:${v}`).join(' · ')||'-'}</span></div>
