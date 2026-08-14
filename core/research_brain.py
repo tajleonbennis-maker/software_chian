@@ -109,11 +109,23 @@ class ResearchBrain:
                               ("slug", "name", "category", "priority", "rationale", "last_run_at")}
                              for row in due_projects]
         try:
+            self.database.brain_event(
+                "think", "选题思考", f"候选 {len(due_projects)} 个到期项目",
+                reason="AI 编排器选择下一个研究对象", project=due_projects[0].get("slug", ""),
+                meta={"candidates": [p.get("slug") for p in due_projects[:5]]})
             raw = analyzer._call_api(prompt, json.dumps(public_candidates, ensure_ascii=False), 500)
             decision = analyzer._extract_json(raw)
-            return next((row for row in due_projects if row["slug"] == decision.get("slug")), fallback)
+            chosen = next((row for row in due_projects if row["slug"] == decision.get("slug")), fallback)
+            self.database.brain_event(
+                "decide", "选题决策", f"选择 {chosen.get('slug', '')}",
+                reason=decision.get("reason", "") or chosen.get("rationale", ""),
+                project=chosen.get("slug", ""), ai_thought=decision.get("reason", ""),
+                meta={"candidates": [p.get("slug") for p in due_projects[:5]]})
+            return chosen
         except Exception as exc:
             logger.warning("AI 选题失败，使用确定性回退: %s", exc)
+            self.database.brain_event("warn", "选题回退", f"AI 选题失败: {exc}", reason="确定性回退",
+                                      project=fallback.get("slug", ""))
             return fallback
 
     def run_once(self):
@@ -133,6 +145,8 @@ class ResearchBrain:
         self.database.start_intelligence_sync(sync_id, "external_product_trends")
         try:
             signals = FofaHotSearchSource(timeout=min(30, self.config.SCAN_TIMEOUT + 10)).fetch()
+            self.database.brain_event("sync", "热搜同步", f"从 FoFa 观测到 {len(signals)} 个热搜信号",
+                                      meta={"count": len(signals)})
             decisions = self._classify_trend_signals(signals)
             promoted = 0
             ranked = sorted(signals, key=lambda row: (not row["is_hot"], -row["hot_score"], row["rank"]))
@@ -237,25 +251,38 @@ class ResearchBrain:
                                               next_run_at=now + self.config.RESEARCH_INTERVAL_SECONDS)
             return
         try:
+            self.database.brain_event("action", "开始发现", f"{project['name']} 拉取公网资产",
+                                      reason=reason, project=project["slug"],
+                                      meta={"query": project["discovery_query"]})
             client = FofaClient(key=self.config.FOFA_KEY, timeout=30, max_retries=2)
             assets = client.search_all(project["discovery_query"], self.config.RESEARCH_DISCOVERY_SIZE)
             public_assets = [asset.to_dict() for asset in assets]
             new_count = self.database.upsert_research_assets(project["slug"], public_assets)
             self.database.finish_research_run(run_id, project["slug"], "completed",
                                               len(public_assets), new_count, next_run_at=next_run)
+            self.database.brain_event("result", "发现完成", f"{project['name']} 发现 {len(public_assets)} 资产",
+                                      detail=f"新增 {new_count} · 复用存量", project=project["slug"],
+                                      meta={"discovered": len(public_assets), "new": new_count})
             logger.info("发现轮次完成: %s discovered=%d new=%d",
                         project["name"], len(public_assets), new_count)
         except Exception as exc:
             self.database.finish_research_run(run_id, project["slug"], "error", error=str(exc),
                                               next_run_at=now + self.config.RESEARCH_INTERVAL_SECONDS)
+            self.database.brain_event("error", "发现失败", f"{project['name']} 拉取失败: {exc}",
+                                      project=project["slug"])
             logger.warning("研究轮次失败: %s: %s", project["name"], exc)
 
     def run_execution_once(self) -> int:
         project = self.database.next_project_with_pending_assets()
         if not project:
             return 0
+        self.database.brain_event("action", "开始分析", f"{project['name']} 深度分析待处理资产",
+                                  project=project["slug"],
+                                  meta={"pending": project.get("pending_count", 0)})
         analyzed_count = self._execute_analysis(project)
         if analyzed_count:
+            self.database.brain_event("result", "分析完成", f"{project['name']} 本轮分析 {analyzed_count} 资产",
+                                      project=project["slug"], meta={"batch": analyzed_count})
             self._analyze_project_results(project)
         logger.info("执行轮次完成: %s confirmed=%d batch=%d", project["name"],
                     analyzed_count, self.config.RESEARCH_ANALYSIS_BATCH)
