@@ -288,6 +288,7 @@ a:hover { text-decoration: underline; }
 <!-- ========== 侧边栏 ========== -->
 <div class="sidebar">
   <div class="sidebar-item active" data-view="overview" onclick="switchView('overview')"><span class="icon">📊</span>概览 / 情报墙</div>
+  <div class="sidebar-item" data-view="cards" onclick="switchView('cards')"><span class="icon">🎯</span>研判卡</div>
   <div class="sidebar-item" data-view="scan" onclick="switchView('scan')"><span class="icon">🔍</span>扫描任务</div>
   <div class="sidebar-item" data-view="assets" onclick="switchView('assets')"><span class="icon">🗄️</span>资产库</div>
   <div class="sidebar-item" data-view="leaks" onclick="switchView('leaks')"><span class="icon">🔑</span>凭据泄露</div>
@@ -296,6 +297,30 @@ a:hover { text-decoration: underline; }
 
 <!-- ========== 主内容 ========== -->
 <div class="main">
+
+  <!-- ===== 研判卡 ===== -->
+  <div class="view" id="view-cards">
+    <div class="page-title">研判卡</div>
+    <div class="page-desc">每天筛出值得研究的变化 · 标注 值得研究 / 噪音 / 证据不足（反馈即训练数据）</div>
+    <div class="kpi-grid" id="cards-kpis"></div>
+    <div class="card">
+      <div class="card-header">
+        <h3>研判卡列表</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="card-filter" onchange="loadCards()" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;">
+            <option value="">全部</option>
+            <option value="pending">待研判</option>
+            <option value="worth">值得研究</option>
+            <option value="noise">噪音</option>
+            <option value="insufficient">证据不足</option>
+            <option value="done">已处理</option>
+          </select>
+          <button class="btn-secondary" onclick="loadCards()">刷新</button>
+        </div>
+      </div>
+      <div id="cards-list"><div class="empty-hint">加载中...</div></div>
+    </div>
+  </div>
 
   <!-- ===== 概览 / 情报墙 ===== -->
   <div class="view active" id="view-overview">
@@ -481,7 +506,7 @@ a:hover { text-decoration: underline; }
 
 <script>
 const TOKEN = '';
-const VIEWS = ['overview','scan','assets','leaks','brain'];
+const VIEWS = ['overview','cards','scan','assets','leaks','brain'];
 
 async function api(path, method='GET', body=null) {
   const headers = {'Content-Type': 'application/json'};
@@ -513,6 +538,68 @@ function setSearch(q) {
   document.getElementById('overview-search').value = q;
   switchView('scan');
   document.getElementById('scan-query').value = q;
+}
+
+/* ===== 研判卡 ===== */
+const CARD_LVL = {0:'L0 测绘', 1:'L1 指纹', 2:'L2 版本', 3:'L3 验证'};
+async function loadCards() {
+  const filter = document.getElementById('card-filter')?.value || '';
+  const q = filter ? '?decision=' + filter : '';
+  const el = document.getElementById('cards-list');
+  el.innerHTML = '<div class="empty-hint">加载中...</div>';
+  try {
+    const d = await api('/api/cards' + q);
+    const st = d.stats || {};
+    document.getElementById('cards-kpis').innerHTML = `
+      <div class="kpi-card"><div class="label">总数</div><div class="value blue">${st.total||0}</div></div>
+      <div class="kpi-card"><div class="label">待研判</div><div class="value orange">${st.pending||0}</div></div>
+      <div class="kpi-card"><div class="label">值得研究</div><div class="value green">${(st.by_decision||{}).worth||0}</div></div>
+      <div class="kpi-card"><div class="label">噪音</div><div class="value">${(st.by_decision||{}).noise||0}</div></div>
+      <div class="kpi-card"><div class="label">证据不足</div><div class="value">${(st.by_decision||{}).insufficient||0}</div></div>`;
+    const cards = d.cards || [];
+    if (!cards.length) { el.innerHTML = '<div class="empty-hint">暂无研判卡</div>'; return; }
+    el.innerHTML = cards.map(c => {
+      const sevColor = c.severity==='CRITICAL'?'var(--accent-red)':c.severity==='HIGH'?'var(--accent-orange)':'#d29922';
+      const dec = c.decision;
+      const decTag = dec==='pending' ? '<span class="badge" style="color:var(--accent-orange);border-color:var(--accent-orange)">待研判</span>'
+        : dec==='worth' ? '<span class="badge" style="color:var(--accent-green);border-color:var(--accent-green)">值得研究</span>'
+        : dec==='noise' ? '<span class="badge">噪音</span>'
+        : dec==='insufficient' ? '<span class="badge" style="color:#8b949e;border-color:#8b949e">证据不足</span>'
+        : '<span class="badge" style="color:#8b949e;border-color:#8b949e">已处理</span>';
+      return `
+      <div class="node-card" style="margin-bottom:10px;padding:14px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+          <div style="flex:1">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <strong>${escapeHtml(c.topic)}</strong>
+              <span class="badge" style="color:${sevColor};border-color:${sevColor}">${escapeHtml(c.severity)}</span>
+              <span class="tag">${escapeHtml(CARD_LVL[c.evidence_level]||'')}</span>
+              <span class="hint">评分 ${c.score} · 资产 ${c.asset_count}</span>
+            </div>
+            <div style="margin-top:6px;color:var(--text-primary)">📈 ${escapeHtml(c.change_text)}</div>
+            <div class="hint" style="margin-top:4px">💡 ${escapeHtml(c.why_worth)}</div>
+            <div class="hint" style="margin-top:4px">📋 证据：${escapeHtml(c.evidence_says)}<br>⚠️ 边界：${escapeHtml(c.evidence_limits)}</div>
+            <div class="hint" style="margin-top:4px">➡️ 下一步：${escapeHtml(c.next_step)}<br>⏹️ 放弃条件：${escapeHtml(c.abort_condition)}</div>
+            ${c.fofa_query?`<div style="margin-top:6px;display:flex;gap:8px;align-items:center"><span class="hint">FOFA：</span><code class="mono" style="background:var(--bg-tertiary);padding:2px 6px;border-radius:4px;font-size:12px">${escapeHtml(c.fofa_query)}</code><button class="btn-secondary" style="padding:2px 8px;font-size:11px" onclick="navigator.clipboard.writeText('${escapeHtml(c.fofa_query)}')">复制</button></div>`:''}
+            <div class="hint" style="margin-top:4px">来源 ${escapeHtml(c.source||'')} · ${escapeHtml(c.card_type)} · ${new Date((c.last_seen||0)*1000).toLocaleString()}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">${decTag}
+            <button class="btn-secondary" style="padding:4px 8px;font-size:11px;color:var(--accent-green)" onclick="decideCard('${c.card_id}','worth')">✓ 值得研究</button>
+            <button class="btn-secondary" style="padding:4px 8px;font-size:11px" onclick="decideCard('${c.card_id}','noise')">✕ 噪音</button>
+            <button class="btn-secondary" style="padding:4px 8px;font-size:11px;color:#8b949e" onclick="decideCard('${c.card_id}','insufficient')">? 证据不足</button>
+            <button class="btn-secondary" style="padding:4px 8px;font-size:11px" onclick="decideCard('${c.card_id}','done')">done 已处理</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<div class="empty-hint">加载失败: ' + escapeHtml(String(e)) + '</div>'; }
+}
+async function decideCard(cardId, decision) {
+  try {
+    const r = await api('/api/cards/' + cardId + '/decide', 'POST', {decision});
+    if (r.ok) loadCards();
+    else alert(r.error || '标记失败');
+  } catch(e) { alert('标记失败: ' + e); }
 }
 
 /* ===== 概览 ===== */
@@ -952,6 +1039,7 @@ function searchOverview() {
 
 /* ===== 初始化 ===== */
 loadOverview();
+loadCards();
 loadAssets();
 loadLeaks();
 loadMonitor();
