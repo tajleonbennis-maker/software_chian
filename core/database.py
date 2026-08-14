@@ -127,6 +127,20 @@ class ScanDatabase:
             db.execute("CREATE INDEX IF NOT EXISTS idx_leaks_status ON credential_leaks(status)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_leaks_target ON credential_leaks(target)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_leaks_api_key ON credential_leaks(api_key_full)")
+            db.execute("""CREATE TABLE IF NOT EXISTS alert_outbox (
+                alert_id TEXT PRIMARY KEY,
+                dedup_key TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                payload_json TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                delivered_at REAL,
+                last_attempt_at REAL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_outbox_key ON alert_outbox(dedup_key)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_outbox_status ON alert_outbox(status)")
             asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
             for name, definition in (
                 ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -498,12 +512,26 @@ class ScanDatabase:
     # 凭据泄露表（credential_leaks）
     # ============================================================
     def upsert_credential_leak(self, leak: Dict[str, Any]):
-        """写入/更新一条凭据泄露记录（按 target+api_key_full 去重）"""
+        """写入/更新一条凭据泄露记录（按 target+api_key_full 去重）
+
+        api_key_full 落库前加密（Codex P0-1）：明文不落盘，只存 Fernet 密文。
+        """
+        from core.secrets_crypto import encrypt_secret, encryption_available
         now = time.time()
+        full_key = leak.get("api_key_full", "") or ""
+        # 已加密的密文不再二次加密；明文则加密（或未配置 SECRET_KEY 时不存完整密钥）
+        stored_key = full_key
+        if full_key:
+            if full_key.startswith("enc:v1:"):
+                stored_key = full_key
+            elif encryption_available():
+                stored_key = encrypt_secret(full_key)
+            else:
+                stored_key = ""  # 无 SECRET_KEY：不持久化完整密钥，仅保留脱敏
         with self._lock, self._connect() as db:
             existing = db.execute(
                 "SELECT leak_id, last_seen FROM credential_leaks WHERE target=? AND api_key_full=?",
-                (leak.get("target", ""), leak.get("api_key_full", ""))).fetchone()
+                (leak.get("target", ""), stored_key)).fetchone()
             if existing:
                 db.execute("""UPDATE credential_leaks SET last_seen=?, status=?,
                     provider=?, base_url=?, evidence=?, node_id=?
@@ -513,22 +541,27 @@ class ScanDatabase:
                      leak.get("node_id", ""), existing["leak_id"]))
                 return existing["leak_id"]
             leak_id = leak.get("leak_id") or (hashlib.md5(
-                (str(leak.get("target", "")) + "|" + str(leak.get("api_key_full", ""))).encode()).hexdigest())
+                (str(leak.get("target", "")) + "|" + str(full_key)).encode()).hexdigest())
             db.execute("""INSERT INTO credential_leaks
                 (leak_id, target, node_id, provider, base_url, api_key_masked, api_key_full,
                  secret_type, source_path, evidence, status, first_seen, last_seen)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (leak_id, leak.get("target", ""), leak.get("node_id", ""),
                  leak.get("provider", ""), leak.get("base_url", ""),
-                 leak.get("api_key_masked", ""), leak.get("api_key_full", ""),
+                 leak.get("api_key_masked", ""), stored_key,
                  leak.get("secret_type", ""), leak.get("source_path", ""),
                  json.dumps(leak.get("evidence", []), ensure_ascii=False),
                  leak.get("status", "new"), now, now))
             return leak_id
 
     def list_credential_leaks(self, limit: int = 100, status: str = "",
-                              target: str = "") -> List[Dict[str, Any]]:
-        """查询凭据泄露记录"""
+                              target: str = "", include_full: bool = False) -> List[Dict[str, Any]]:
+        """查询凭据泄露记录
+
+        include_full=False 时删除 api_key_full（前端仅用 masked）；
+        include_full=True 时解密返回完整密钥（仅限已授权管理员调用）。
+        """
+        from core.secrets_crypto import decrypt_secret
         sql = "SELECT * FROM credential_leaks WHERE 1=1"
         params: list = []
         if status:
@@ -541,7 +574,13 @@ class ScanDatabase:
         params.append(limit)
         with self._connect() as db:
             rows = db.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+        leaks = [dict(row) for row in rows]
+        for l in leaks:
+            if include_full and l.get("api_key_full"):
+                l["api_key_full"] = decrypt_secret(l["api_key_full"])
+            else:
+                l.pop("api_key_full", None)
+        return leaks
 
     def credential_leak_stats(self) -> Dict[str, Any]:
         """凭据泄露统计"""
@@ -554,6 +593,63 @@ class ScanDatabase:
             by_target = dict(db.execute(
                 "SELECT target, COUNT(*) c FROM credential_leaks GROUP BY target ORDER BY c DESC LIMIT 20").fetchall())
         return {"total": total, "by_provider": by_provider, "by_type": by_type, "by_target": by_target}
+
+    # ============================================================
+    # 告警 outbox（持久化投递队列，Codex P1）
+    # ============================================================
+    def outbox_insert(self, alert_id: str, dedup_key: str, channel: str, payload: Dict[str, Any]):
+        """插入一条待投递告警"""
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT OR IGNORE INTO alert_outbox
+                (alert_id, dedup_key, channel, status, payload_json, created_at)
+                VALUES (?,?,?,?,?,?)""",
+                (alert_id, dedup_key, channel, "pending",
+                 json.dumps(payload, ensure_ascii=False), now))
+
+    def outbox_pending(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """查询待投递（含失败待重试）的告警"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM alert_outbox WHERE status IN ('pending','failed') "
+                "AND attempt_count < 5 ORDER BY created_at ASC LIMIT ?",
+                (limit,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["payload"] = json.loads(d.pop("payload_json"))
+            out.append(d)
+        return out
+
+    def outbox_mark(self, alert_id: str, delivered: bool, error: str = ""):
+        """标记投递结果：成功置 delivered，失败记录错误并递增尝试次数"""
+        now = time.time()
+        with self._lock, self._connect() as db:
+            if delivered:
+                db.execute("UPDATE alert_outbox SET status='delivered', delivered_at=?, last_attempt_at=? "
+                           "WHERE alert_id=?", (now, now, alert_id))
+            else:
+                db.execute("""UPDATE alert_outbox SET status='failed', last_error=?,
+                    attempt_count=attempt_count+1, last_attempt_at=? WHERE alert_id=?""",
+                    (error[:500], now, alert_id))
+
+    def outbox_delivered_recently(self, dedup_key: str, cooldown: float) -> bool:
+        """去重：同一 dedup_key 在冷却期内是否已有 delivered 记录"""
+        now = time.time()
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT delivered_at FROM alert_outbox WHERE dedup_key=? AND status='delivered' "
+                "ORDER BY delivered_at DESC LIMIT 1", (dedup_key,)).fetchone()
+        return bool(row and row["delivered_at"] and (now - row["delivered_at"]) < cooldown)
+
+    def alert_outbox_available(self) -> bool:
+        """outbox 表是否可用（存在即可用）"""
+        try:
+            with self._connect() as db:
+                db.execute("SELECT 1 FROM alert_outbox LIMIT 1")
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _row_to_dict(row, include_results: bool) -> Dict[str, Any]:
