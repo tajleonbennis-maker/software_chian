@@ -545,7 +545,14 @@ def _run_deep_analysis(task_id: str, params: Dict[str, Any], result: Dict[str, A
 
             # 2. 基于技术的漏洞匹配
             vulns = checker.check(techs)
-            item["vulnerabilities"] = [v.to_dict() for v in vulns]
+            vuln_dicts = [v.to_dict() for v in vulns]
+            # 漏洞级验证语义（Codex P0-2）：主动 HTTP 探测 + 指纹命中 → condition_matched
+            for vd in vuln_dicts:
+                if vd.get("verification_status", "suspected") == "suspected":
+                    vd["verification_status"] = "condition_matched"
+                    vd["verification_method"] = "active_http_probe_fingerprint"
+                    vd["verified_at"] = time.time()
+            item["vulnerabilities"] = vuln_dicts
 
             # 3. API 端点发现 + 安全分析（含敏感信息/SK 检测）
             asset = Asset(host=target, ip=target, port=443, protocol="https", url=target)
