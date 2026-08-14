@@ -6,7 +6,11 @@
 
 字段集对齐 Grok 建议：
 [级别] 类型 / 资产 / 组件版本 / 摘要 / 时间 / 来源 / 置信度 / SK(脱敏) / 链接
+
+去重与投递状态持久化（Codex P1）：使用 SQLite alert_outbox 表，跨 worker 一致、
+重启不丢、失败重试（最多 5 次），仅成功投递后登记去重。
 """
+import hashlib
 import json
 import logging
 import os
@@ -16,15 +20,16 @@ import urllib.request
 
 logger = logging.getLogger("Notifier")
 
-# 告警去重：key -> 上次推送时间戳（防告警风暴，Codex 建议）
-_alert_dedup = {}
-_alert_lock = threading.Lock()
-# 默认冷却时间（秒）：同一资产 + 同一类型的告警，在冷却期内不重复推送
+# 默认冷却时间（秒）：同一 dedup_key 在冷却期内不重复推送
 DEFAULT_COOLDOWN = int(os.environ.get("ALERT_COOLDOWN_SECONDS", "3600"))
+_lock = threading.Lock()
+_db = None  # 延迟注入 ScanDatabase 实例
 
 
-def _now_str() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+def set_database(db):
+    """注入数据库实例（大脑 app 启动时调用）"""
+    global _db
+    _db = db
 
 
 def alert_key(alert: dict) -> str:
@@ -36,22 +41,13 @@ def alert_key(alert: dict) -> str:
     return f"{asset}|{atype}|{component}|{cve}".lower()
 
 
-def is_duplicate(alert: dict, cooldown: int = DEFAULT_COOLDOWN) -> bool:
-    """判断是否冷却期内重复告警；非重复则登记"""
-    key = alert_key(alert)
-    if not key or key == "|||":
-        return False
-    now = time.time()
-    with _alert_lock:
-        last = _alert_dedup.get(key)
-        if last and (now - last) < cooldown:
-            return True
-        _alert_dedup[key] = now
-        # 简单内存清理：最多保留 5000 个键
-        if len(_alert_dedup) > 5000:
-            for k in list(_alert_dedup.keys())[:1000]:
-                _alert_dedup.pop(k, None)
-    return False
+def alert_id(alert: dict) -> str:
+    """告警稳定 ID（用于 outbox 幂等）"""
+    return hashlib.md5(alert_key(alert).encode()).hexdigest()
+
+
+def _now_str() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _mask_key(key: str, keep: int = 4) -> str:
@@ -135,18 +131,49 @@ def send_telegram(bot_token: str, chat_id: str, payload: dict, timeout: int = 10
 
 def notify(alert: dict, webhook_url: str = "", bot_token: str = "", chat_id: str = "",
            cooldown: int = DEFAULT_COOLDOWN) -> bool:
-    """统一告警入口：去重 → 规范化 payload → 按已配置通道推送
-
-    返回 True 表示推送成功；去重命中（冷却期内）返回 False 且不推送。
+    """统一告警入口（outbox 持久化版）：
+    - 去重查询基于已 delivered 记录（跨 worker 一致、重启不丢）
+    - 写入 alert_outbox 并尝试立即投递；失败留待 flush_outbox 重试
     """
-    # 去重：同一资产 + 类型 + 组件在冷却期内不重复推送
-    if is_duplicate(alert, cooldown):
-        logger.debug("告警去重命中，跳过: %s", alert_key(alert))
+    if not (_db is not None and _db.alert_outbox_available()):
+        logger.warning("告警 outbox 不可用（未注入数据库），跳过")
         return False
-    payload = format_alert(alert)
+    key = alert_key(alert)
+    if not key or key == "|||":
+        return False
+    # 去重：冷却期内已有 delivered 记录则跳过
+    with _lock:
+        if _db.outbox_delivered_recently(key, cooldown):
+            logger.debug("告警去重命中（已投递）: %s", key)
+            return False
+        payload = format_alert(alert)
+        _db.outbox_insert(alert_id(alert), key, "brain", payload)
+    # 立即尝试投递
+    return _deliver(alert_id(alert), payload, webhook_url, bot_token, chat_id)
+
+
+def _deliver(aid: str, payload: dict, webhook_url: str, bot_token: str, chat_id: str) -> bool:
+    """投递单条告警；成功标记 delivered，失败标记 failed 待重试"""
     sent = False
     if webhook_url:
         sent = send_webhook(webhook_url, payload) or sent
     if bot_token and chat_id:
         sent = send_telegram(bot_token, chat_id, payload) or sent
+    if _db is not None:
+        _db.outbox_mark(aid, delivered=sent, error="" if sent else "no channel configured / send failed")
     return sent
+
+
+def flush_outbox(webhook_url: str = "", bot_token: str = "", chat_id: str = "",
+                 max_items: int = 20) -> int:
+    """重试待投递告警（失败重试，最多 5 次）。返回本次成功数。"""
+    if _db is None:
+        return 0
+    pending = _db.outbox_pending(limit=max_items)
+    delivered = 0
+    for item in pending:
+        payload = item.get("payload") or {}
+        ok = _deliver(item["alert_id"], payload, webhook_url, bot_token, chat_id)
+        if ok:
+            delivered += 1
+    return delivered
