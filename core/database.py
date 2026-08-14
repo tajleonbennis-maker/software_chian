@@ -168,6 +168,18 @@ class ScanDatabase:
             db.execute("CREATE INDEX IF NOT EXISTS idx_cards_topic ON decision_cards(topic)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_cards_decision ON decision_cards(decision)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_cards_dedup ON decision_cards(dedup_key)")
+            db.execute("""CREATE TABLE IF NOT EXISTS brain_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                event_type TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                project TEXT NOT NULL DEFAULT '',
+                ai_thought TEXT NOT NULL DEFAULT '',
+                meta_json TEXT NOT NULL DEFAULT ''
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_brain_events_ts ON brain_events(ts DESC)")
             asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
             for name, definition in (
                 ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -758,6 +770,44 @@ class ScanDatabase:
                 "SELECT decision, COUNT(*) c FROM decision_cards GROUP BY decision").fetchall())
             pending = db.execute("SELECT COUNT(*) c FROM decision_cards WHERE decision='pending'").fetchone()["c"]
         return {"total": total, "pending": pending, "by_decision": by_decision}
+
+    # ============================================================
+    # 大脑活动流 brain_events（思考可视化）
+    # ============================================================
+    def brain_event(self, event_type: str, action: str = "", detail: str = "",
+                    reason: str = "", project: str = "", ai_thought: str = "",
+                    meta: dict = None):
+        """记录一条大脑活动（思考过程可视化）"""
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO brain_events
+                (ts, event_type, action, detail, reason, project, ai_thought, meta_json)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (time.time(), event_type, action, detail, reason, project, ai_thought,
+                 json.dumps(meta or {}, ensure_ascii=False)))
+            # 只保留最近 2000 条，避免膨胀
+            db.execute("""DELETE FROM brain_events WHERE event_id NOT IN
+                (SELECT event_id FROM brain_events ORDER BY event_id DESC LIMIT 2000)""")
+
+    def brain_events(self, limit: int = 100, event_type: str = "") -> List[Dict[str, Any]]:
+        """查询大脑活动流（按时间倒序）"""
+        sql = "SELECT * FROM brain_events WHERE 1=1"
+        params: list = []
+        if event_type:
+            sql += " AND event_type=?"
+            params.append(event_type)
+        sql += " ORDER BY event_id DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["meta"] = json.loads(d.pop("meta_json") or "{}")
+            except Exception:
+                d["meta"] = {}
+            out.append(d)
+        return out
 
     @staticmethod
     def _row_to_dict(row, include_results: bool) -> Dict[str, Any]:
