@@ -522,9 +522,7 @@ def probe_research_project(project_slug: str, asset_data: Dict[str, Any]) -> Dic
 
 
 # Start only after all shared detectors and the bounded execution callback exist.
-research_brain = ResearchBrain(scan_database, Config, analyze_research_candidate,
-                               probe_research_project)
-research_brain.start()
+# research_brain is initialized below after node_planner is created.
 
 
 def _alert_outbox_worker():
@@ -543,6 +541,15 @@ threading.Thread(target=_alert_outbox_worker, daemon=True).start()
 
 # 大脑端任务分发器：向执行引擎（worker 节点）下发任务并回收结果
 task_dispatcher = TaskDispatcher(scan_database, Config)
+
+# 节点集群调度器：把研究大脑的资产分析分发给多台节点并行执行
+from core.node_planner import NodePlanner
+node_planner = NodePlanner(task_dispatcher, scan_database, Config)
+
+# 研究大脑：编排选题 → 发现 → 分析（本地确认 + 节点并行深度分析）
+research_brain = ResearchBrain(scan_database, Config, analyze_research_candidate,
+                               probe_research_project, node_planner)
+research_brain.start()
 
 
 def run_analysis(task_id: str, mode: str, fofa_query: str, fofa_key: str,
@@ -1403,6 +1410,44 @@ def api_dispatch():
         results = task_dispatcher.dispatch_to_all(task)
         return jsonify({"ok": True, "results": results})
     result = task_dispatcher.dispatch(task)
+    return jsonify(result), (200 if result.get("ok") else 502)
+
+
+@app.route("/api/nodes/status")
+def api_nodes_status():
+    """节点集群实时状态（供态势大屏展示每台节点在干什么）"""
+    planner = globals().get("node_planner")
+    if planner:
+        return jsonify(planner.node_status())
+    return jsonify({"nodes": [], "total": 0, "online": 0})
+
+
+@app.route("/api/nodes/pump", methods=["POST"])
+def api_nodes_pump():
+    """手动给节点集群派活：把某项目的待分析资产分发给节点。
+    Body: {"project": "dify", "limit": 40}
+    """
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    project = (payload.get("project") or "").strip()
+    limit = min(int(payload.get("limit", 40)), 100)
+    planner = globals().get("node_planner")
+    if not planner:
+        return jsonify({"error": "node_planner 未初始化"}), 500
+    if not project:
+        # 未指定项目：找下一个有 pending 资产的项目
+        proj = scan_database.next_project_with_pending_assets()
+        if not proj:
+            return jsonify({"ok": False, "error": "没有待分析项目"})
+        project = proj["slug"]
+    pending = scan_database.pending_research_assets(project, limit)
+    targets = [c["asset"].get("url") for c in pending if c.get("asset", {}).get("url")]
+    name = project
+    proj_row = scan_database.next_project_with_pending_assets()
+    if proj_row and proj_row.get("slug") == project:
+        name = proj_row.get("name", project)
+    result = planner.dispatch_pending(project, targets, name)
     return jsonify(result), (200 if result.get("ok") else 502)
 
 
