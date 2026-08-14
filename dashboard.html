@@ -282,6 +282,7 @@ a:hover { text-decoration: underline; }
   <div class="brand"><span class="brand-icon">🛡️</span>软件供应链安全分析平台</div>
   <div class="spacer"></div>
   <span class="badge" style="color:var(--accent-orange);border-color:var(--accent-orange);margin-right:12px" id="mode-badge">实验模式</span>
+  <input id="lab-token-input" type="password" placeholder="X-Lab-Token" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;width:160px;margin-right:8px" title="大脑管理 Token（保存在本地）">
   <div class="status-badge"><span class="status-dot"></span><span id="topbar-status">连接中...</span></div>
 </div>
 
@@ -293,6 +294,7 @@ a:hover { text-decoration: underline; }
   <div class="sidebar-item" data-view="assets" onclick="switchView('assets')"><span class="icon">🗄️</span>资产库</div>
   <div class="sidebar-item" data-view="leaks" onclick="switchView('leaks')"><span class="icon">🔑</span>凭据泄露</div>
   <div class="sidebar-item" data-view="brain" onclick="switchView('brain')"><span class="icon">🧠</span>大脑监控</div>
+  <div class="sidebar-item" data-view="brainstream" onclick="switchView('brainstream')"><span class="icon">📡</span>大脑思考流</div>
 </div>
 
 <!-- ========== 主内容 ========== -->
@@ -482,6 +484,31 @@ a:hover { text-decoration: underline; }
   </div>
 </div>
 
+<!-- ===== 大脑思考流 ===== -->
+  <div class="view" id="view-brainstream">
+    <div class="page-title">大脑思考流</div>
+    <div class="page-desc">研究大脑正在干什么、为什么这样做、AI 在想什么（实时更新）</div>
+    <div class="card">
+      <div class="card-header">
+        <h3>实时活动流</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="bs-filter" onchange="loadBrainStream()" style="background:#0f1420;border:1px solid #2a3550;color:#e8eaf0;padding:6px 10px;border-radius:6px;font-size:12px;">
+            <option value="">全部</option>
+            <option value="think">思考</option>
+            <option value="decide">决策</option>
+            <option value="action">动作</option>
+            <option value="result">结果</option>
+            <option value="sync">热搜同步</option>
+            <option value="warn">警告</option>
+            <option value="error">错误</option>
+          </select>
+          <button class="btn-secondary" onclick="loadBrainStream()">刷新</button>
+        </div>
+      </div>
+      <div id="brain-stream"><div class="empty-hint">加载中...</div></div>
+    </div>
+  </div>
+
 <!-- ========== 抽屉 ========== -->
 <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
 <div class="drawer" id="drawer">
@@ -505,14 +532,16 @@ a:hover { text-decoration: underline; }
 </div>
 
 <script>
-const TOKEN = '';
-const VIEWS = ['overview','cards','scan','assets','leaks','brain'];
+const TOKEN_KEY = 'workbuddy_lab_token';
+const TOKEN = localStorage.getItem(TOKEN_KEY) || '';
+const VIEWS = ['overview','cards','scan','assets','leaks','brain','brainstream'];
 
 async function api(path, method='GET', body=null) {
   const headers = {'Content-Type': 'application/json'};
-  if (TOKEN) headers['X-Lab-Token'] = TOKEN;
   // 通过 nginx 反代访问时（/sc/ 前缀），API 请求也带上前缀，走同一后端
   const base = window.location.pathname.startsWith('/sc/') ? '/sc' : '';
+  const token = localStorage.getItem(TOKEN_KEY) || '';
+  if (token) headers['X-Lab-Token'] = token;
   const opts = {method, headers};
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(base + path, opts);
@@ -600,6 +629,37 @@ async function decideCard(cardId, decision) {
     if (r.ok) loadCards();
     else alert(r.error || '标记失败');
   } catch(e) { alert('标记失败: ' + e); }
+}
+
+/* ===== 大脑思考流 ===== */
+const BS_ICON = {think:'🤔', decide:'🎯', action:'⚙️', result:'✅', sync:'📡', warn:'⚠️', error:'❌'};
+async function loadBrainStream() {
+  const filter = document.getElementById('bs-filter')?.value || '';
+  const q = filter ? '?type=' + filter : '';
+  const el = document.getElementById('brain-stream');
+  el.innerHTML = '<div class="empty-hint">加载中...</div>';
+  try {
+    const d = await api('/api/brain/events' + q);
+    const events = d.events || [];
+    if (!events.length) { el.innerHTML = '<div class="empty-hint">暂无大脑活动（等研究大脑跑一轮）</div>'; return; }
+    el.innerHTML = events.map(e => {
+      const icon = BS_ICON[e.event_type] || '•';
+      const color = e.event_type==='error'?'var(--accent-red)':e.event_type==='warn'?'var(--accent-orange)':e.event_type==='result'?'var(--accent-green)':e.event_type==='decide'?'var(--accent-blue)':'var(--text-secondary)';
+      const meta = e.meta || {};
+      const extra = Object.keys(meta).length ? `<div class="hint" style="margin-top:2px;font-size:11px">${JSON.stringify(meta).slice(0,180)}</div>` : '';
+      return `
+      <div style="border-left:3px solid ${color};padding:10px 12px;margin-bottom:8px;background:var(--bg-tertiary);border-radius:0 6px 6px 0">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><span style="color:${color}">${icon}</span> <strong>${escapeHtml(e.action||'')}</strong> ${e.project?`<span class="tag">${escapeHtml(e.project)}</span>`:''}</div>
+          <span class="hint" style="font-size:11px">${new Date((e.ts||0)*1000).toLocaleString()}</span>
+        </div>
+        ${e.detail?`<div class="hint" style="margin-top:4px">${escapeHtml(e.detail)}</div>`:''}
+        ${e.reason?`<div class="hint" style="margin-top:2px">💬 理由：${escapeHtml(e.reason)}</div>`:''}
+        ${e.ai_thought?`<div class="hint" style="margin-top:2px;color:var(--accent-blue)">🧠 AI 思考：${escapeHtml(e.ai_thought)}</div>`:''}
+        ${extra}
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<div class="empty-hint">加载失败: ' + escapeHtml(String(e)) + '</div>'; }
 }
 
 /* ===== 概览 ===== */
@@ -1044,13 +1104,22 @@ loadAssets();
 loadLeaks();
 loadMonitor();
 loadAnalytics();
+// token 输入持久化
+const ti = document.getElementById('lab-token-input');
+if (ti) {
+  ti.value = localStorage.getItem(TOKEN_KEY) || '';
+  ti.addEventListener('change', () => localStorage.setItem(TOKEN_KEY, ti.value.trim()));
+}
+
 loadResearch();
 loadProjectAnalysis();
+loadBrainStream();
 setInterval(loadMonitor, 5000);
 setInterval(loadOverview, 15000);
 setInterval(loadLeaks, 20000);
 setInterval(loadResearch, 30000);
 setInterval(loadProjectAnalysis, 60000);
+setInterval(loadBrainStream, 8000);
 </script>
 </body>
 </html>
