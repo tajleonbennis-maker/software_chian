@@ -23,6 +23,27 @@ SEED_PROJECTS = [
         "priority": 100, "rationale": "近期热门开源 AI 教学项目；已有公开部署与配置暴露观察样本。",
     },
     {
+        "slug": "firecrawl", "name": "Firecrawl",
+        "repository": "https://github.com/firecrawl/firecrawl",
+        "upstream": "Firecrawl", "license": "AGPL-3.0",
+        "discovery_query": 'title="Firecrawl" || body="Firecrawl"', "category": "AI 数据采集 / 爬虫",
+        "priority": 98, "rationale": "热门开源 Web 数据采集基础设施；重点研究自托管 API、认证边界与依赖供应链。",
+    },
+    {
+        "slug": "flowise", "name": "Flowise",
+        "repository": "https://github.com/FlowiseAI/Flowise",
+        "upstream": "FlowiseAI", "license": "Apache-2.0",
+        "discovery_query": 'title="Flowise" || body="Flowise"', "category": "AI 工作流 / Agent 平台",
+        "priority": 96, "rationale": "流行的可视化 LLM 工作流平台；重点研究公开部署、连接凭据与工作流 API 边界。",
+    },
+    {
+        "slug": "langflow", "name": "Langflow",
+        "repository": "https://github.com/langflow-ai/langflow",
+        "upstream": "Langflow", "license": "MIT",
+        "discovery_query": 'title="Langflow" || body="Langflow"', "category": "AI 工作流 / Agent 平台",
+        "priority": 94, "rationale": "热门开源 Agent 构建平台；重点研究自托管认证、组件依赖与公开 API 面。",
+    },
+    {
         "slug": "open-webui", "name": "Open WebUI",
         "repository": "https://github.com/open-webui/open-webui",
         "upstream": "Open WebUI Community", "license": "BSD-3-Clause",
@@ -54,6 +75,9 @@ SEED_PROJECTS = [
 
 OFFICIAL_DOMAINS = {
     "deeptutor": ("deeptutor.info",),
+    "firecrawl": ("firecrawl.dev",),
+    "flowise": ("flowiseai.com",),
+    "langflow": ("langflow.org",),
     "open-webui": ("openwebui.com", "openwebui.com.cn"),
     "dify": ("dify.ai", "dify.com"),
     "anythingllm": ("anythingllm.com", "mintplexlabs.com"),
@@ -233,17 +257,19 @@ class ResearchBrain:
         }
 
     def run_discovery_once(self):
-        project = self.database.next_research_project()
-        if not project:
-            return
-        # Fetch a small due set for AI choice while retaining deterministic bounds.
+        # Build the due set directly so disabled or malformed projects can
+        # never monopolize the research clock.
         overview = self.database.research_overview()
         now = time.time()
+        allowed = set(getattr(self.config, "RESEARCH_ALLOWED_PROJECTS", ()) or ())
         due = [row for row in overview["projects"] if row.get("enabled") and
+               str(row.get("discovery_query") or "").strip() and
+               (not allowed or row.get("slug") in allowed) and
                (not row.get("next_run_at") or row["next_run_at"] <= now)]
-        if due:
-            due.sort(key=lambda row: (-row["priority"], row.get("last_run_at") or 0))
-            project = self._choose_project(due[:10])
+        if not due:
+            return
+        due.sort(key=lambda row: (-row["priority"], row.get("last_run_at") or 0))
+        project = self._choose_project(due[:10])
         run_id = uuid.uuid4().hex
         reason = f"自动研究：{project['rationale']}"
         self.database.start_research_run(run_id, project["slug"], reason)
@@ -275,7 +301,8 @@ class ResearchBrain:
             logger.warning("研究轮次失败: %s: %s", project["name"], exc)
 
     def run_execution_once(self) -> int:
-        project = self.database.next_project_with_pending_assets()
+        project = self.database.next_project_with_pending_assets(
+            getattr(self.config, "RESEARCH_ALLOWED_PROJECTS", ()))
         if not project:
             return 0
         self.database.brain_event("action", "开始分析", f"{project['name']} 深度分析待处理资产",
@@ -295,7 +322,11 @@ class ResearchBrain:
                     dispatched = d.get("dispatched", 0)
             except Exception as exc:
                 logger.warning("节点分发失败，回退本地: %s", exc)
-        analyzed_count = self._execute_analysis(project)
+        # In production the brain is a control plane. It only falls back to a
+        # local executor when explicitly enabled or no worker channel accepted
+        # the batch (useful for single-machine development).
+        allow_local = bool(getattr(self.config, "BRAIN_LOCAL_EXECUTION_ENABLED", False))
+        analyzed_count = self._execute_analysis(project) if (allow_local or not dispatched) else 0
         if analyzed_count:
             self.database.brain_event("result", "分析完成", f"{project['name']} 本轮分析 {analyzed_count} 资产",
                                       project=project["slug"], meta={"batch": analyzed_count})
@@ -364,7 +395,8 @@ class ResearchBrain:
         evidence, score = [], 0
         aliases = {"open-webui": ("open webui",), "anythingllm": ("anythingllm",),
                    "lobechat": ("lobechat", "lobe chat"), "deeptutor": ("deeptutor",),
-                   "dify": ("dify",)}.get(slug, (name.lower(),))
+                   "dify": ("dify",), "firecrawl": ("firecrawl",),
+                   "flowise": ("flowise",), "langflow": ("langflow",)}.get(slug, (name.lower(),))
         if project.get("origin") == "trend":
             evidence.append("外部产品指纹命中"); score += 1
         if any(alias in title for alias in aliases):
@@ -377,6 +409,9 @@ class ResearchBrain:
             "open-webui": ("/api/v1/auths", "/api/config"),
             "anythingllm": ("/api/system", "/api/workspace"),
             "lobechat": ("/api/chat", "/settings/provider"),
+            "firecrawl": ("/v1/scrape", "/v1/crawl", "/admin"),
+            "flowise": ("/api/v1", "/api/v1/prediction", "/signin"),
+            "langflow": ("/api/v1", "/api/v1/run", "/login"),
         }.get(slug, ())
         if any(any(path.startswith(prefix) for prefix in project_paths) for path in paths):
             evidence.append("匹配项目专属路由"); score += 2
