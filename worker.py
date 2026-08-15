@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import requests
 from dotenv import load_dotenv
@@ -42,6 +43,8 @@ NODE_NAME = os.environ.get("NODE_NAME", NODE_ID)
 NODE_TOKEN = os.environ.get("NODE_TOKEN", "")
 HEARTBEAT_INTERVAL = max(30, int(os.environ.get("HEARTBEAT_INTERVAL", "60")))
 TASK_POLL_INTERVAL = max(10, int(os.environ.get("TASK_POLL_INTERVAL", "30")))
+TASK_LEASE_RENEW_INTERVAL = max(
+    10, int(os.environ.get("TASK_LEASE_RENEW_INTERVAL", "60")))
 CAPABILITIES = [c.strip() for c in os.environ.get(
     "NODE_CAPABILITIES", "fofa,vuln,api,tech").split(",") if c.strip()]
 
@@ -49,6 +52,10 @@ CAPABILITIES = [c.strip() for c in os.environ.get(
 FOFA_KEY = os.environ.get("FOFA_KEY", "")
 FOFA_SIZE = int(os.environ.get("FOFA_SIZE", "100"))
 SCAN_TIMEOUT = int(os.environ.get("SCAN_TIMEOUT", "10"))
+AUTHORIZED_SCAN_DOMAINS = tuple(
+    value.strip().lower() for value in os.environ.get("AUTHORIZED_SCAN_DOMAINS", "").split(",")
+    if value.strip())
+KAFKA_ENABLED = os.environ.get("KAFKA_ENABLED", "true").lower() == "true"
 
 
 def _headers() -> Dict[str, str]:
@@ -64,6 +71,23 @@ def _require_node_id():
     if not NODE_ID:
         logger.error("必须配置 NODE_ID 环境变量")
         sys.exit(1)
+
+
+def _task_scope_error(task_type: str, params: Dict[str, Any]) -> str:
+    """Reject active work outside the explicit production authorization scope."""
+    if not AUTHORIZED_SCAN_DOMAINS or task_type == "echo":
+        return ""
+    if task_type == "fofa_discovery":
+        query = str(params.get("query") or "").lower()
+        if not any(domain in query for domain in AUTHORIZED_SCAN_DOMAINS):
+            return "FoFa 查询不包含授权域名"
+        return ""
+    for target in params.get("targets") or []:
+        host = (urlsplit(str(target)).hostname or "").lower()
+        if not any(host == domain or host.endswith("." + domain)
+                   for domain in AUTHORIZED_SCAN_DOMAINS):
+            return f"目标不在授权范围: {host or 'invalid-host'}"
+    return ""
 
 
 # ============================================================
@@ -89,6 +113,14 @@ def execute_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "remediation": "",
         "conclusion_boundary": "靶场复现不等同于第三方公网实例已被利用。",
     }
+
+    scope_error = _task_scope_error(task_type, params)
+    if scope_error:
+        result["status"] = "error"
+        result["reproduction_summary"] = scope_error
+        result["conclusion_boundary"] = "任务被生产授权范围策略阻止，未发起目标请求。"
+        logger.warning("任务 %s 被授权范围策略阻止: %s", task_id, scope_error)
+        return result
 
     try:
         if task_type == "fofa_discovery":
@@ -128,6 +160,17 @@ SECRET_PATTERNS = [
     (r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY", "私钥 Private Key"),
     (r"(?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key)\s*[:=]\s*[\"'][a-zA-Z0-9_\-]{16,}[\"']", "硬编码密钥"),
 ]
+
+
+def _is_credential_issue(issue: str) -> bool:
+    """Return True only for an issue that explicitly concerns credential material."""
+    lowered = str(issue or "").lower()
+    terms = (
+        "凭证", "密钥", "密码", "访问令牌", "api key", "api_key",
+        "access key", "access_key", "secret key", "secret_key",
+        "bearer token", "jwt token", "private key",
+    )
+    return any(term in lowered for term in terms)
 
 
 KNOWN_APP_PANELS = {
@@ -573,10 +616,10 @@ def _run_deep_analysis(task_id: str, params: Dict[str, Any], result: Dict[str, A
             for ep in endpoints:
                 for issue in getattr(ep, "issues", []) or []:
                     txt = str(issue)
-                    if any(k in txt for k in ("凭证", "密钥", "敏感", "Token", "泄露")):
+                    if _is_credential_issue(txt):
                         sensitive_hits.append({"endpoint": ep.url, "issue": txt})
             for finding in item.get("exposure_findings", []):
-                if finding.get("risk_level") in ("high", "medium"):
+                if finding.get("confirmed_secret"):
                     sensitive_hits.append({"type": "exposure", "detail": finding.get("evidence", "")})
 
             # 6. JS 文件密钥模式扫描（真实密钥值检测，如 sk-xxx / AKIAxxx）
@@ -783,6 +826,15 @@ class Worker:
         resp.raise_for_status()
         return resp.json()
 
+    def _claim_task(self, task_id: str = "") -> Optional[Dict[str, Any]]:
+        params = {"node_id": NODE_ID}
+        if task_id:
+            params["task_id"] = task_id
+        resp = self._http.get(f"{BRAIN_URL}/api/tasks/assign", params=params,
+                              headers=_headers(), timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("task")
+
     def heartbeat(self):
         """向大脑上报心跳与能力（含系统资源指标）"""
         payload = {
@@ -799,48 +851,90 @@ class Worker:
         except Exception as exc:
             logger.warning("心跳上报失败: %s", exc)
 
+    def _renew_task_lease_loop(self, task: Dict[str, Any], stop_event: threading.Event):
+        """Keep a long-running attempt leased while its scanner is busy."""
+        payload = {
+            "task_id": task.get("task_id", ""),
+            "attempt_id": task.get("attempt_id", ""),
+            "node_id": NODE_ID,
+        }
+        while not stop_event.wait(TASK_LEASE_RENEW_INTERVAL):
+            try:
+                response = requests.post(
+                    f"{BRAIN_URL}/api/tasks/lease/renew", json=payload,
+                    headers=_headers(), timeout=15)
+                if response.status_code == 409:
+                    logger.error("任务 %s 租约已失效", payload["task_id"])
+                    return
+                response.raise_for_status()
+            except Exception as exc:
+                logger.warning("任务 %s 续租失败: %s", payload["task_id"], exc)
+
+    def _execute_leased_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute, continuously renew, then atomically report one leased task."""
+        lease_stop = threading.Event()
+        lease_thread = threading.Thread(
+            target=self._renew_task_lease_loop, args=(task, lease_stop),
+            daemon=True, name=f"lease-{task.get('task_id', '')[:8]}")
+        lease_thread.start()
+        try:
+            result = execute_task(task)
+        finally:
+            lease_stop.set()
+            lease_thread.join(timeout=2)
+        report = {
+            "task_id": task.get("task_id", ""),
+            "attempt_id": task.get("attempt_id", ""),
+            "node_id": NODE_ID,
+            "name": NODE_NAME,
+            "status": "ready",
+            "capabilities": CAPABILITIES,
+            "metrics": _collect_system_metrics(),
+            "experiments": [result],
+        }
+        self._post("/api/lab/report", report)
+        return result
+
     def poll_and_execute(self):
         """拉取任务并执行（此处以本机队列演示；生产可用大脑推送或 Redis 队列）"""
         # 当前实现：心跳 + 直接执行"待分发"任务由大脑侧调度。
         # 为了让链路可测，worker 每次轮询从大脑拉一个示例任务（若大脑配置了待办）。
         try:
             # 拉取任务端点（大脑未配置时返回空）
-            resp = self._http.get(
-                f"{BRAIN_URL}/api/tasks/assign?node_id={NODE_ID}",
-                headers=_headers(), timeout=15)
-            if resp.status_code == 200:
-                task = resp.json().get("task")
-                if task:
-                    result = execute_task(task)
-                    report = {
-                        "node_id": NODE_ID,
-                        "name": NODE_NAME,
-                        "status": "ready",
-                        "capabilities": CAPABILITIES,
-                        "metrics": {"ts": time.time()},
-                        "experiments": [result],
-                    }
-                    self._post("/api/lab/report", report)
-                    logger.info("任务 %s 结果已回传大脑", task.get("task_id"))
+            resp = None
+            task = self._claim_task()
+            if task:
+                self._execute_leased_task(task)
+                logger.info("任务 %s 结果已回传大脑", task.get("task_id"))
         except requests.exceptions.HTTPError:
             pass  # 大脑未提供 assign 端点时静默
         except Exception as exc:
             logger.warning("轮询任务失败: %s", exc)
 
+    def _heartbeat_loop(self):
+        """Report liveness independently from potentially long task scans."""
+        while not self.stop_event.is_set():
+            self.heartbeat()
+            self.stop_event.wait(HEARTBEAT_INTERVAL)
+
     def run(self):
         _require_node_id()
         logger.info("Worker %s 启动: 大脑=%s 能力=%s", NODE_ID, BRAIN_URL, CAPABILITIES)
         # Kafka 任务消费者（若 Kafka 可用）：消费大脑投递的 deep_analysis 任务
-        try:
-            from core.kafka_pipeline import KafkaConsumer
-            kafka_bs = os.environ.get("KAFKA_BOOTSTRAP", "121.41.98.7:9092")
-            consumer = KafkaConsumer(bootstrap_servers=kafka_bs,
-                                     group_id=f"supply-{NODE_ID}")
-            consumer.start(self._handle_kafka_task)
-        except Exception as exc:
-            logger.warning("Kafka 消费端启动失败（继续轮询大脑）: %s", exc)
+        if KAFKA_ENABLED:
+            try:
+                from core.kafka_pipeline import KafkaConsumer
+                kafka_bs = os.environ.get("KAFKA_BOOTSTRAP", "121.41.98.7:9092")
+                consumer = KafkaConsumer(bootstrap_servers=kafka_bs,
+                                         group_id=os.environ.get("KAFKA_CONSUMER_GROUP", "supply-workers"))
+                consumer.start(self._handle_kafka_task)
+            except Exception as exc:
+                logger.warning("Kafka 消费端启动失败（继续轮询大脑）: %s", exc)
+        else:
+            logger.info("Kafka 已由配置停用，使用数据库租约 + HTTP Pull")
+        threading.Thread(target=self._heartbeat_loop, daemon=True,
+                         name="worker-heartbeat").start()
         while not self.stop_event.is_set():
-            self.heartbeat()
             self.poll_and_execute()
             self.stop_event.wait(HEARTBEAT_INTERVAL)
 
@@ -850,32 +944,15 @@ class Worker:
         转换为 execute_task 需要的 params 结构后执行，回传大脑。
         """
         try:
-            kafka_task = {
-                "task_id": task.get("task_id", uuid.uuid4().hex),
-                "type": task.get("type", "deep_analysis"),
-                "params": {
-                    "project_slug": task.get("project_slug", "kafka"),
-                    "project_name": task.get("project_name", task.get("project_slug", "kafka")),
-                    "targets": task.get("targets", []),
-                    "online": task.get("online", True),
-                    "hypothesis": task.get("hypothesis", f"Kafka 任务 {task.get('task_id','')[:8]}"),
-                },
-            }
+            # Kafka carries only the availability signal. The brain's durable
+            # ledger grants the authoritative attempt lease before execution.
+            kafka_task = self._claim_task(task.get("task_id", ""))
+            if not kafka_task:
+                logger.info("Kafka 任务 %s 已被其他节点领取或完成", task.get("task_id", ""))
+                return True
             logger.info("Kafka 消费任务 %s (%d targets)", kafka_task["task_id"],
                         len(kafka_task["params"]["targets"]))
-            result = execute_task(kafka_task)
-            report = {
-                "node_id": NODE_ID,
-                "name": NODE_NAME,
-                "status": "ready",
-                "capabilities": CAPABILITIES,
-                "metrics": _collect_system_metrics(),
-                "experiments": [result],
-            }
-            try:
-                self._post("/api/lab/report", report)
-            except Exception as exc:
-                logger.warning("Kafka 任务结果回传失败: %s", exc)
+            result = self._execute_leased_task(kafka_task)
             return result.get("status") != "error"
         except Exception as exc:
             logger.error("Kafka 任务处理异常: %s", exc)
@@ -898,6 +975,8 @@ def main():
         task = request.get_json(silent=True) or {}
         result = execute_task(task)
         report = {
+            "task_id": task.get("task_id", ""),
+            "attempt_id": task.get("attempt_id", ""),
             "node_id": NODE_ID,
             "name": NODE_NAME,
             "status": "ready",
