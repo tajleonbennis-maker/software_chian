@@ -208,6 +208,81 @@ class ScanDatabase:
                 created_at REAL NOT NULL
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS idx_audits_repo ON code_audits(repo)")
+            db.execute("""CREATE TABLE IF NOT EXISTS node_task_queue (
+                task_id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL DEFAULT '',
+                project_slug TEXT NOT NULL DEFAULT '',
+                project_name TEXT NOT NULL DEFAULT '',
+                task_type TEXT NOT NULL DEFAULT 'deep_analysis',
+                targets_json TEXT NOT NULL DEFAULT '[]',
+                params_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                claimed_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_ntq_status ON node_task_queue(status, created_at)")
+            queue_columns = {row[1] for row in db.execute("PRAGMA table_info(node_task_queue)")}
+            for name, definition in (
+                ("attempt_id", "TEXT"),
+                ("lease_expires_at", "REAL"),
+                ("available_at", "REAL"),
+                ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("max_attempts", "INTEGER NOT NULL DEFAULT 3"),
+                ("last_error", "TEXT NOT NULL DEFAULT ''"),
+                ("result_json", "TEXT"),
+                ("finished_at", "REAL"),
+            ):
+                if name not in queue_columns:
+                    db.execute(f"ALTER TABLE node_task_queue ADD COLUMN {name} {definition}")
+            db.execute("UPDATE node_task_queue SET available_at=created_at WHERE available_at IS NULL")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_ntq_available ON node_task_queue(status, available_at)")
+            db.execute("""CREATE TABLE IF NOT EXISTS node_task_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                lease_started_at REAL NOT NULL,
+                lease_expires_at REAL NOT NULL,
+                last_renewed_at REAL,
+                finished_at REAL,
+                error TEXT NOT NULL DEFAULT '',
+                result_digest TEXT NOT NULL DEFAULT ''
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_nta_task ON node_task_attempts(task_id, attempt_no)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_nta_status ON node_task_attempts(status, lease_expires_at)")
+            db.execute("""CREATE TABLE IF NOT EXISTS supply_chain_entities (
+                entity_id TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                canonical_key TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                scope TEXT NOT NULL DEFAULT 'observed',
+                source TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                attributes_json TEXT NOT NULL DEFAULT '{}',
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                UNIQUE(entity_type, canonical_key)
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sce_type ON supply_chain_entities(entity_type)")
+            db.execute("""CREATE TABLE IF NOT EXISTS supply_chain_relations (
+                relation_id TEXT PRIMARY KEY,
+                project_slug TEXT NOT NULL DEFAULT '',
+                asset_identity TEXT NOT NULL DEFAULT '',
+                subject_id TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'observed',
+                source TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                UNIQUE(project_slug, asset_identity, subject_id, predicate, object_id)
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_scr_asset ON supply_chain_relations(project_slug, asset_identity)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_scr_object ON supply_chain_relations(object_id, predicate)")
             asset_columns = {row[1] for row in db.execute("PRAGMA table_info(research_assets)")}
             for name, definition in (
                 ("analysis_status", "TEXT NOT NULL DEFAULT 'pending'"),
@@ -266,6 +341,477 @@ class ScanDatabase:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM scan_tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [self._row_to_dict(row, False) for row in rows]
+
+    # ============================================================
+    # Distributed worker queue (durable lease-based task ledger)
+    # ============================================================
+    def enqueue_node_task(self, task: Dict[str, Any]) -> str:
+        """Persist one worker task before making it available for execution."""
+        task_id = task.get("task_id") or hashlib.sha256(
+            json.dumps(task, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:32]
+        params = dict(task.get("params") or {})
+        targets = params.get("targets") or task.get("targets") or []
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT OR IGNORE INTO node_task_queue
+                (task_id,node_id,project_slug,project_name,task_type,targets_json,
+                 params_json,status,created_at,updated_at,available_at,max_attempts)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                task_id, "", params.get("project_slug", task.get("project_slug", "")),
+                params.get("project_name", task.get("project_name", "")),
+                task.get("type", "deep_analysis"),
+                json.dumps(targets, ensure_ascii=False),
+                json.dumps(params, ensure_ascii=False), "pending", now, now, now,
+                int(task.get("max_attempts", 3)),
+            ))
+        return task_id
+
+    def mark_node_task_published(self, task_id: str) -> bool:
+        """Mark a durable task as published to the Kafka transport."""
+        with self._lock, self._connect() as db:
+            updated = db.execute("""UPDATE node_task_queue SET status='published', updated_at=?
+                WHERE task_id=? AND status='pending'""", (time.time(), task_id))
+        return updated.rowcount == 1
+
+    @staticmethod
+    def _retry_delay_seconds(attempt_count: int) -> int:
+        """Short bounded exponential backoff for a failed/expired attempt."""
+        return min(300, 5 * (2 ** max(0, int(attempt_count) - 1)))
+
+    def _reap_expired_node_tasks_in_tx(self, db, now: float) -> Dict[str, int]:
+        rows = db.execute("""SELECT * FROM node_task_queue
+            WHERE status IN ('leased','running') AND lease_expires_at IS NOT NULL
+              AND lease_expires_at<?""", (now,)).fetchall()
+        retried = dead = 0
+        for task in rows:
+            exhausted = task["attempt_count"] >= task["max_attempts"]
+            next_status = "dead" if exhausted else "retry_wait"
+            available_at = None if exhausted else now + self._retry_delay_seconds(task["attempt_count"])
+            updated = db.execute("""UPDATE node_task_queue SET status=?, node_id='',
+                attempt_id=NULL, lease_expires_at=NULL, available_at=?, updated_at=?,
+                finished_at=?, last_error=CASE WHEN last_error='' THEN 'worker lease expired'
+                                               ELSE last_error END
+                WHERE task_id=? AND attempt_id=? AND status IN ('leased','running')""", (
+                    next_status, available_at, now, now if exhausted else None,
+                    task["task_id"], task["attempt_id"],
+                ))
+            if updated.rowcount != 1:
+                continue
+            db.execute("""UPDATE node_task_attempts SET status='expired', finished_at=?,
+                error=CASE WHEN error='' THEN 'worker lease expired' ELSE error END
+                WHERE attempt_id=? AND status IN ('leased','running')""",
+                (now, task["attempt_id"]))
+            asset_status = "failed" if exhausted else "running"
+            for target in json.loads(task["targets_json"] or "[]"):
+                identity = str(target).rstrip("/").lower()
+                db.execute("""UPDATE research_assets SET analysis_status=?,
+                    analysis_error='worker lease expired'
+                    WHERE project_slug=? AND identity=?""",
+                    (asset_status, task["project_slug"], identity))
+            if exhausted:
+                dead += 1
+            else:
+                retried += 1
+        return {"expired": len(rows), "retry_wait": retried, "dead": dead}
+
+    def reap_expired_node_tasks(self, now: Optional[float] = None) -> Dict[str, int]:
+        """Periodically recover expired leases without waiting for another claim."""
+        current = time.time() if now is None else float(now)
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = self._reap_expired_node_tasks_in_tx(db, current)
+            db.commit()
+        return result
+
+    def claim_node_task(self, node_id: str, lease_seconds: int = 300,
+                        task_id: str = "") -> Optional[Dict[str, Any]]:
+        """Atomically lease the oldest available task to a worker."""
+        now = time.time()
+        attempt_id = hashlib.sha256(f"{node_id}:{now}:{os.urandom(8).hex()}".encode()).hexdigest()[:32]
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._reap_expired_node_tasks_in_tx(db, now)
+            if task_id:
+                row = db.execute("""SELECT * FROM node_task_queue WHERE task_id=?
+                    AND status IN ('pending','published','retry_wait')
+                    AND attempt_count<max_attempts AND COALESCE(available_at,created_at)<=?""",
+                    (task_id, now)).fetchone()
+            else:
+                # HTTP pull is an authoritative fallback for every queued
+                # task. Kafka is only an availability signal; the atomic
+                # ledger update below prevents duplicate execution.
+                row = db.execute("""SELECT * FROM node_task_queue
+                    WHERE status IN ('pending','published','retry_wait') AND attempt_count<max_attempts
+                      AND COALESCE(available_at,created_at)<=?
+                    ORDER BY COALESCE(available_at,created_at) ASC, created_at ASC LIMIT 1""",
+                    (now,)).fetchone()
+            if not row:
+                db.commit()
+                return None
+            updated = db.execute("""UPDATE node_task_queue SET status='leased', node_id=?,
+                attempt_id=?, lease_expires_at=?, attempt_count=attempt_count+1,
+                claimed_at=?, updated_at=?, available_at=NULL WHERE task_id=?
+                AND status IN ('pending','published','retry_wait')""",
+                (node_id, attempt_id, now + lease_seconds, now, now, row["task_id"]))
+            if updated.rowcount != 1:
+                db.rollback()
+                return None
+            claimed = db.execute("SELECT * FROM node_task_queue WHERE task_id=?",
+                                 (row["task_id"],)).fetchone()
+            db.execute("""INSERT INTO node_task_attempts
+                (attempt_id,task_id,node_id,attempt_no,status,lease_started_at,lease_expires_at)
+                VALUES (?,?,?,?,?,?,?)""", (
+                    attempt_id, row["task_id"], node_id, claimed["attempt_count"],
+                    "leased", now, now + lease_seconds,
+                ))
+            db.commit()
+        item = dict(claimed)
+        params = json.loads(item.pop("params_json") or "{}")
+        params["targets"] = json.loads(item.pop("targets_json") or "[]")
+        return {
+            "task_id": item["task_id"], "attempt_id": item["attempt_id"],
+            "type": item["task_type"], "params": params,
+            "lease_expires_at": item["lease_expires_at"],
+        }
+
+    def renew_node_task_lease(self, task_id: str, attempt_id: str, node_id: str,
+                              lease_seconds: int = 300) -> bool:
+        """Extend an active attempt lease without reviving an expired attempt."""
+        if not task_id or not attempt_id or not node_id:
+            return False
+        now = time.time()
+        with self._lock, self._connect() as db:
+            updated = db.execute("""UPDATE node_task_queue
+                SET status='running', lease_expires_at=?, updated_at=?
+                WHERE task_id=? AND attempt_id=? AND node_id=?
+                  AND status IN ('leased','running')
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at>=?""", (
+                    now + max(30, int(lease_seconds)), now,
+                    task_id, attempt_id, node_id, now,
+                ))
+            if updated.rowcount == 1:
+                db.execute("""UPDATE node_task_attempts SET status='running',
+                    lease_expires_at=?, last_renewed_at=? WHERE attempt_id=?
+                    AND task_id=? AND node_id=? AND status IN ('leased','running')""",
+                    (now + max(30, int(lease_seconds)), now,
+                     attempt_id, task_id, node_id))
+        return updated.rowcount == 1
+
+    def node_task_overview(self) -> Dict[str, Any]:
+        """Return aggregate queue health without exposing task payloads."""
+        now = time.time()
+        with self._connect() as db:
+            counts = {
+                row["status"]: row["count"]
+                for row in db.execute(
+                    "SELECT status, COUNT(*) count FROM node_task_queue GROUP BY status")
+            }
+            oldest = db.execute("""SELECT MIN(created_at) created_at
+                FROM node_task_queue WHERE status IN ('pending','published','retry_wait')""").fetchone()
+            expired = db.execute("""SELECT COUNT(*) count FROM node_task_queue
+                WHERE status IN ('leased','running')
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at<?""",
+                (now,)).fetchone()["count"]
+            recent = db.execute("""SELECT
+                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
+                SUM(CASE WHEN status IN ('failed','dead') THEN 1 ELSE 0 END) failed
+                FROM node_task_queue WHERE finished_at>=?""", (now - 300,)).fetchone()
+            duration_rows = db.execute("""SELECT finished_at-claimed_at duration
+                FROM node_task_queue WHERE status='completed' AND claimed_at IS NOT NULL
+                  AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 200""").fetchall()
+            renewed = db.execute("""SELECT COUNT(*) count FROM node_task_attempts
+                WHERE last_renewed_at>=?""", (now - 300,)).fetchone()["count"]
+        queued = (counts.get("pending", 0) + counts.get("published", 0)
+                  + counts.get("retry_wait", 0))
+        oldest_at = oldest["created_at"] if oldest else None
+        durations = sorted(max(0.0, float(row["duration"])) for row in duration_rows)
+
+        def percentile(fraction: float) -> float:
+            if not durations:
+                return 0.0
+            index = min(len(durations) - 1, max(0, int(round((len(durations) - 1) * fraction))))
+            return round(durations[index], 2)
+
+        return {
+            "total": sum(counts.values()),
+            "by_status": counts,
+            "queued": queued,
+            "active": counts.get("leased", 0) + counts.get("running", 0),
+            "terminal_failed": counts.get("failed", 0) + counts.get("dead", 0),
+            "expired_leases": expired,
+            "oldest_queued_seconds": max(0, int(now - oldest_at)) if oldest_at else 0,
+            "throughput_5m": {
+                "completed": int(recent["completed"] or 0),
+                "failed": int(recent["failed"] or 0),
+            },
+            "duration_seconds": {"p50": percentile(0.50), "p95": percentile(0.95)},
+            "lease_renewals_5m": int(renewed),
+        }
+
+    def node_task_outstanding(self, project_slug: str = "") -> int:
+        """Count non-terminal work globally or for one research project."""
+        sql = """SELECT COUNT(*) count FROM node_task_queue
+            WHERE status IN ('pending','published','retry_wait','leased','running')"""
+        params = ()
+        if project_slug:
+            sql += " AND project_slug=?"
+            params = (project_slug,)
+        with self._connect() as db:
+            return int(db.execute(sql, params).fetchone()["count"])
+
+    def online_worker_count(self, max_age_seconds: int = 300) -> int:
+        with self._connect() as db:
+            return int(db.execute(
+                "SELECT COUNT(*) count FROM lab_nodes WHERE last_heartbeat>=?",
+                (time.time() - max_age_seconds,)).fetchone()["count"])
+
+    def release_research_assets(self, project_slug: str, targets: List[str],
+                                reason: str = "scheduler backpressure") -> int:
+        """Return assets reserved by the planner to pending when no task was made."""
+        identities = [str(target).rstrip("/").lower() for target in targets if target]
+        if not identities:
+            return 0
+        placeholders = ",".join("?" for _ in identities)
+        with self._lock, self._connect() as db:
+            updated = db.execute(f"""UPDATE research_assets SET analysis_status='pending',
+                analysis_error=? WHERE project_slug=? AND analysis_status='running'
+                AND identity IN ({placeholders})""",
+                (reason[:1000], project_slug, *identities))
+        return updated.rowcount
+
+    def pause_research_assets(self, project_slug: str, targets: List[str], reason: str) -> int:
+        """Quarantine reserved assets which fall outside the production scope."""
+        identities = [str(target).rstrip("/").lower() for target in targets if target]
+        if not identities:
+            return 0
+        placeholders = ",".join("?" for _ in identities)
+        with self._lock, self._connect() as db:
+            updated = db.execute(f"""UPDATE research_assets SET analysis_status='paused',
+                analysis_error=? WHERE project_slug=? AND identity IN ({placeholders})""",
+                (reason[:1000], project_slug, *identities))
+        return updated.rowcount
+
+    @staticmethod
+    def _normalize_worker_analysis(item: Dict[str, Any], task_id: str) -> Dict[str, Any]:
+        """Turn raw Worker evidence into a bounded, explainable asset verdict."""
+        technologies = item.get("technologies") if isinstance(item.get("technologies"), list) else []
+        vulnerabilities = item.get("vulnerabilities") if isinstance(item.get("vulnerabilities"), list) else []
+        api_endpoints = item.get("api_endpoints") if isinstance(item.get("api_endpoints"), list) else []
+        exposures = item.get("exposure_findings") if isinstance(item.get("exposure_findings"), list) else []
+        sensitive = item.get("sensitive_hits") if isinstance(item.get("sensitive_hits"), list) else []
+        js_hits = item.get("js_secret_scan") if isinstance(item.get("js_secret_scan"), list) else []
+        panel_hits = item.get("panel_secret_scan") if isinstance(item.get("panel_secret_scan"), list) else []
+        api_report = item.get("api_report") if isinstance(item.get("api_report"), dict) else {}
+        try:
+            risk_score = max(0, min(100, int(api_report.get("risk_score") or 0)))
+        except (TypeError, ValueError):
+            risk_score = 0
+
+        verified = [v for v in vulnerabilities if isinstance(v, dict) and
+                    str(v.get("verification_status", "")).lower() == "actively_verified"]
+        conditions = [v for v in vulnerabilities if isinstance(v, dict) and
+                      str(v.get("verification_status", "suspected")).lower() == "condition_matched"]
+        verified_severities = {str(v.get("severity", "")).upper() for v in verified}
+        confirmed_secrets = sensitive + js_hits + panel_hits
+        useful_exposures = [row for row in exposures if isinstance(row, dict) and not row.get("error")]
+        reasons = []
+        confidence = "low"
+        if confirmed_secrets:
+            risk_score = max(risk_score, 85)
+            confidence = "high"
+            reasons.append(f"敏感信息线索 {len(confirmed_secrets)}")
+        if "CRITICAL" in verified_severities:
+            risk_score = max(risk_score, 90)
+            confidence = "high"
+            reasons.append("存在已复验严重漏洞")
+        elif "HIGH" in verified_severities:
+            risk_score = max(risk_score, 75)
+            confidence = "high"
+            reasons.append("存在已复验高危漏洞")
+        elif verified:
+            risk_score = max(risk_score, 55)
+            confidence = "high"
+            reasons.append(f"已复验漏洞 {len(verified)}")
+        if api_report.get("risk_score"):
+            confidence = "medium" if confidence == "low" else confidence
+            reasons.append(f"API 风险评分 {api_report.get('risk_score')}")
+        if conditions:
+            risk_score = max(risk_score, 30)
+            reasons.append(f"条件匹配漏洞 {len(conditions)}（未确认可利用）")
+        if useful_exposures:
+            risk_score = max(risk_score, 20)
+            reasons.append(f"公开暴露线索 {len(useful_exposures)}")
+        if not reasons and technologies:
+            reasons.append(f"识别组件 {len(technologies)}，暂未发现明确风险")
+        if item.get("error"):
+            reasons.append("分析未完成：" + str(item["error"])[:180])
+
+        if risk_score >= 80:
+            risk_level = "CRITICAL"
+        elif risk_score >= 60:
+            risk_level = "HIGH"
+        elif risk_score >= 30:
+            risk_level = "MEDIUM"
+        elif risk_score > 0:
+            risk_level = "LOW"
+        else:
+            risk_level = "INFO"
+        return {
+            "asset": {"url": item.get("target", ""), "host": item.get("target", "")},
+            "technologies": technologies,
+            "vulnerabilities": vulnerabilities,
+            "api_endpoints": api_endpoints,
+            "api_report": api_report or None,
+            "exposure_findings": exposures,
+            "sensitive_hits": sensitive,
+            "js_secret_scan": js_hits,
+            "panel_secret_scan": panel_hits,
+            "worker_task_id": task_id,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "confidence": confidence,
+            "vuln_count": len(vulnerabilities),
+            "tech_count": len(technologies),
+            "api_count": len(api_endpoints),
+            "finding_summary": reasons or ["未发现明确风险信号"],
+        }
+
+    def complete_node_task(self, task_id: str, attempt_id: str, result: Dict[str, Any]) -> bool:
+        """Idempotently finish a leased task and reconcile research asset state."""
+        if not task_id or not attempt_id:
+            return False
+        now = time.time()
+        succeeded = result.get("status") == "completed"
+        final_status = "completed"
+        evidence = result.get("evidence") if isinstance(result.get("evidence"), list) else []
+        result_json = json.dumps(result, ensure_ascii=False)
+        result_digest = hashlib.sha256(result_json.encode()).hexdigest()
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            task = db.execute("SELECT * FROM node_task_queue WHERE task_id=?", (task_id,)).fetchone()
+            if not task or task["attempt_id"] != attempt_id:
+                db.rollback()
+                return False
+            if task["status"] == "completed":
+                db.commit()
+                return True
+            if task["status"] not in ("leased", "running"):
+                db.rollback()
+                return False
+            error = "" if succeeded else str(
+                result.get("reproduction_summary", "task failed"))[:1000]
+            if not succeeded:
+                final_status = ("retry_wait" if task["attempt_count"] < task["max_attempts"]
+                                else "dead")
+            available_at = (now + self._retry_delay_seconds(task["attempt_count"])
+                            if final_status == "retry_wait" else None)
+            db.execute("""UPDATE node_task_queue SET status=?, result_json=?, last_error=?,
+                finished_at=?, lease_expires_at=NULL, available_at=?, updated_at=?,
+                attempt_id=CASE WHEN ?='completed' THEN attempt_id ELSE NULL END,
+                node_id=CASE WHEN ?='completed' THEN node_id ELSE '' END
+                WHERE task_id=?""", (
+                final_status, result_json, error,
+                now if final_status in ("completed", "dead") else None,
+                available_at, now, final_status, final_status, task_id,
+            ))
+            db.execute("""UPDATE node_task_attempts SET status=?, finished_at=?,
+                error=?, result_digest=? WHERE attempt_id=?""", (
+                    "completed" if succeeded else "failed", now, error,
+                    result_digest, attempt_id,
+                ))
+            if succeeded:
+                project_slug = task["project_slug"]
+                for item in evidence:
+                    if not isinstance(item, dict) or not item.get("target"):
+                        continue
+                    identity = str(item["target"]).rstrip("/").lower()
+                    analysis = self._normalize_worker_analysis(item, task_id)
+                    db.execute("""UPDATE research_assets SET analysis_status='completed',
+                        analysis_json=?, analyzed_at=?, analysis_error=''
+                        WHERE identity=? AND project_slug=?""",
+                        (json.dumps(analysis, ensure_ascii=False), now, identity, project_slug))
+            elif not succeeded:
+                # The existing ledger task owns retryable assets. Do not put
+                # them back into ResearchBrain's pending pool, which would
+                # create a second task for the same target. Exhausted tasks
+                # become terminal and require an explicit retry policy.
+                asset_status = "running" if final_status == "retry_wait" else "failed"
+                for target in json.loads(task["targets_json"] or "[]"):
+                    identity = str(target).rstrip("/").lower()
+                    db.execute("""UPDATE research_assets SET analysis_status=?,
+                        analysis_error=? WHERE project_slug=? AND identity=?""",
+                        (asset_status, error, task["project_slug"], identity))
+            db.commit()
+        return True
+
+    def node_task_attempts(self, task_id: str) -> List[Dict[str, Any]]:
+        """Return the immutable attempt timeline for one task."""
+        with self._connect() as db:
+            rows = db.execute("""SELECT * FROM node_task_attempts WHERE task_id=?
+                ORDER BY attempt_no ASC""", (task_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def node_task_summary(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return non-payload task context for orchestration and audit hooks."""
+        with self._connect() as db:
+            row = db.execute("""SELECT task_id,project_slug,project_name,task_type,status,
+                attempt_count,max_attempts,created_at,updated_at,finished_at
+                FROM node_task_queue WHERE task_id=?""", (task_id,)).fetchone()
+        return dict(row) if row else None
+
+    def dead_node_tasks(self, limit: int = 50, project_slug: str = "") -> List[Dict[str, Any]]:
+        """List terminal worker tasks without returning target or result payloads."""
+        safe_limit = min(200, max(1, int(limit)))
+        sql = """SELECT task_id,project_slug,project_name,task_type,status,
+            attempt_count,max_attempts,last_error,created_at,updated_at,finished_at,
+            json_array_length(COALESCE(targets_json, '[]')) target_count
+            FROM node_task_queue WHERE status='dead'"""
+        params: List[Any] = []
+        if project_slug:
+            sql += " AND project_slug=?"
+            params.append(project_slug)
+        sql += " ORDER BY COALESCE(finished_at,updated_at) DESC LIMIT ?"
+        params.append(safe_limit)
+        with self._connect() as db:
+            rows = db.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def retry_dead_node_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Grant one explicit retry attempt while preserving the full attempt history."""
+        if not task_id:
+            return None
+        now = time.time()
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            task = db.execute("SELECT * FROM node_task_queue WHERE task_id=?",
+                              (task_id,)).fetchone()
+            if not task or task["status"] != "dead":
+                db.rollback()
+                return None
+            new_max_attempts = max(int(task["max_attempts"]),
+                                   int(task["attempt_count"]) + 1)
+            updated = db.execute("""UPDATE node_task_queue SET status='pending',
+                node_id='', attempt_id=NULL, lease_expires_at=NULL, available_at=?,
+                finished_at=NULL, updated_at=?, max_attempts=?
+                WHERE task_id=? AND status='dead'""", (
+                    now, now, new_max_attempts, task_id,
+                ))
+            if updated.rowcount != 1:
+                db.rollback()
+                return None
+            for target in json.loads(task["targets_json"] or "[]"):
+                identity = str(target).rstrip("/").lower()
+                db.execute("""UPDATE research_assets SET analysis_status='running',
+                    analysis_error='manual retry queued'
+                    WHERE project_slug=? AND identity=? AND analysis_status='failed'""",
+                    (task["project_slug"], identity))
+            db.commit()
+        return {
+            "task_id": task_id,
+            "status": "pending",
+            "attempt_count": int(task["attempt_count"]),
+            "max_attempts": new_max_attempts,
+        }
 
     def seed_research_projects(self, projects: List[Dict[str, Any]]):
         now = time.time()
@@ -403,15 +949,22 @@ class ScanDatabase:
                            (project_slug, *identities))
         return [{"identity": row["identity"], "asset": json.loads(row["asset_json"])} for row in rows]
 
-    def next_project_with_pending_assets(self) -> Optional[Dict[str, Any]]:
+    def next_project_with_pending_assets(self, allowed_slugs=None) -> Optional[Dict[str, Any]]:
         """Pick the project whose pending queue has waited the longest."""
+        allowed = tuple(slug for slug in (allowed_slugs or ()) if slug)
+        scope_sql = ""
+        params: List[Any] = []
+        if allowed:
+            scope_sql = " AND p.slug IN (" + ",".join("?" for _ in allowed) + ")"
+            params.extend(allowed)
         with self._connect() as db:
             row = db.execute("""
                 SELECT p.*, MIN(a.first_seen) AS oldest_pending
                 FROM research_projects p JOIN research_assets a ON a.project_slug=p.slug
                 WHERE p.enabled=1 AND a.analysis_status IN ('pending','error')
+                """ + scope_sql + """
                 GROUP BY p.slug ORDER BY oldest_pending ASC, p.priority DESC LIMIT 1
-            """).fetchone()
+            """, params).fetchone()
         return dict(row) if row else None
 
     def save_research_analysis(self, identity: str, project_slug: str,
@@ -510,7 +1063,7 @@ class ScanDatabase:
         with self._connect() as db:
             rows = db.execute("""SELECT a.*,p.name AS project_name,p.upstream,p.repository,p.license
                 FROM research_assets a JOIN research_projects p ON p.slug=a.project_slug
-                WHERE a.analysis_status='completed' AND a.analysis_json IS NOT NULL
+                WHERE p.enabled=1 AND a.analysis_status='completed' AND a.analysis_json IS NOT NULL
                 ORDER BY a.analyzed_at DESC LIMIT ?""", (limit,)).fetchall()
         result = []
         for row in rows:
@@ -524,6 +1077,191 @@ class ScanDatabase:
             }
             item.update({"first_seen": row["first_seen"], "last_seen": row["last_seen"],
                          "scan_count": row["observation_count"], "research_managed": True})
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _supply_entity_id(entity_type: str, canonical_key: str) -> str:
+        raw = f"{entity_type.strip().lower()}:{canonical_key.strip().lower()}"
+        return "sce-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+    def upsert_supply_chain_graph(self, project_slug: str, asset_identity: str,
+                                  graph: Dict[str, Any]) -> Dict[str, int]:
+        """Persist a passive infrastructure graph without granting scan scope.
+
+        Supplier entities are observations only.  They must never be promoted
+        into research_assets or Worker targets by this method.
+        """
+        now = time.time()
+        entity_ids = {}
+        inserted_entities = 0
+        inserted_relations = 0
+        with self._lock, self._connect() as db:
+            for entity in graph.get("entities", []):
+                entity_type = str(entity.get("type") or "unknown").strip().lower()
+                canonical_key = str(entity.get("key") or "").strip().lower()
+                if not canonical_key:
+                    continue
+                entity_id = self._supply_entity_id(entity_type, canonical_key)
+                entity_ids[(entity_type, canonical_key)] = entity_id
+                exists = db.execute(
+                    "SELECT 1 FROM supply_chain_entities WHERE entity_id=?", (entity_id,)
+                ).fetchone()
+                db.execute("""INSERT INTO supply_chain_entities
+                    (entity_id,entity_type,canonical_key,display_name,scope,source,
+                     confidence,attributes_json,first_seen,last_seen)
+                    VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id) DO UPDATE SET
+                    display_name=excluded.display_name,scope=excluded.scope,
+                    source=excluded.source,confidence=excluded.confidence,
+                    attributes_json=excluded.attributes_json,last_seen=excluded.last_seen""", (
+                    entity_id, entity_type, canonical_key,
+                    str(entity.get("name") or canonical_key),
+                    str(entity.get("scope") or "observed"),
+                    str(entity.get("source") or "passive"),
+                    max(0.0, min(1.0, float(entity.get("confidence", 0)))),
+                    json.dumps(entity.get("attributes") or {}, ensure_ascii=False), now, now,
+                ))
+                inserted_entities += int(not exists)
+
+            # Snapshot semantics: preserve disappeared relationships as stale
+            # history, then reactivate every relationship present now.
+            db.execute("""UPDATE supply_chain_relations SET status='stale',last_seen=?
+                WHERE project_slug=? AND asset_identity=?""",
+                (now, project_slug, asset_identity))
+            for relation in graph.get("relations", []):
+                subject = relation.get("subject") or {}
+                obj = relation.get("object") or {}
+                subject_key = (str(subject.get("type") or "").lower(),
+                               str(subject.get("key") or "").lower())
+                object_key = (str(obj.get("type") or "").lower(),
+                              str(obj.get("key") or "").lower())
+                subject_id = entity_ids.get(subject_key)
+                object_id = entity_ids.get(object_key)
+                predicate = str(relation.get("predicate") or "").strip().upper()
+                if not subject_id or not object_id or not predicate:
+                    continue
+                relation_raw = "|".join((project_slug, asset_identity, subject_id,
+                                         predicate, object_id))
+                relation_id = "scr-" + hashlib.sha256(relation_raw.encode()).hexdigest()[:24]
+                exists = db.execute(
+                    "SELECT 1 FROM supply_chain_relations WHERE relation_id=?", (relation_id,)
+                ).fetchone()
+                db.execute("""INSERT INTO supply_chain_relations
+                    (relation_id,project_slug,asset_identity,subject_id,predicate,
+                     object_id,status,source,confidence,evidence_json,first_seen,last_seen)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(relation_id) DO UPDATE SET
+                    status=excluded.status,source=excluded.source,
+                    confidence=excluded.confidence,evidence_json=excluded.evidence_json,
+                    last_seen=excluded.last_seen""", (
+                    relation_id, project_slug, asset_identity, subject_id, predicate,
+                    object_id, str(relation.get("status") or "observed"),
+                    str(relation.get("source") or "passive"),
+                    max(0.0, min(1.0, float(relation.get("confidence", 0)))),
+                    json.dumps(relation.get("evidence") or {}, ensure_ascii=False), now, now,
+                ))
+                inserted_relations += int(not exists)
+        return {"new_entities": inserted_entities, "new_relations": inserted_relations}
+
+    def supply_chain_for_asset(self, project_slug: str, asset_identity: str) -> Dict[str, Any]:
+        with self._connect() as db:
+            rows = db.execute("""SELECT r.*,s.entity_type subject_type,
+                    s.canonical_key subject_key,s.display_name subject_name,s.scope subject_scope,
+                    o.entity_type object_type,o.canonical_key object_key,
+                    o.display_name object_name,o.scope object_scope,o.attributes_json object_attributes
+                FROM supply_chain_relations r
+                JOIN supply_chain_entities s ON s.entity_id=r.subject_id
+                JOIN supply_chain_entities o ON o.entity_id=r.object_id
+                WHERE r.project_slug=? AND r.asset_identity=?
+                ORDER BY r.first_seen,r.predicate""", (project_slug, asset_identity)).fetchall()
+        relations = []
+        suppliers = set()
+        for row in rows:
+            item = dict(row)
+            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            item["object_attributes"] = json.loads(item.get("object_attributes") or "{}")
+            if item.get("object_scope") == "supplier" and item.get("object_type") == "organization":
+                suppliers.add(item.get("object_name") or item.get("object_key"))
+            relations.append(item)
+        return {"relations": relations, "relation_count": len(relations),
+                "supplier_count": len(suppliers), "suppliers": sorted(suppliers)}
+
+    def supply_chain_overview(self, project_slug: str = "") -> Dict[str, Any]:
+        where = "WHERE r.status NOT IN ('stale','disabled')" + (
+            " AND r.project_slug=?" if project_slug else "")
+        params = (project_slug,) if project_slug else ()
+        with self._connect() as db:
+            counts = db.execute(f"""SELECT COUNT(DISTINCT CASE WHEN r.asset_identity NOT LIKE 'system:%'
+                        THEN r.asset_identity END) assets,
+                    COUNT(DISTINCT CASE WHEN r.asset_identity NOT LIKE 'system:%'
+                        THEN r.asset_identity END) url_entries,
+                    COUNT(DISTINCT CASE WHEN r.asset_identity LIKE 'system:%'
+                        THEN r.asset_identity END) systems,
+                    COUNT(DISTINCT CASE WHEN r.predicate='RESOLVES_TO' AND r.status='current'
+                        THEN r.subject_id END) current_hosts,
+                    COUNT(DISTINCT CASE WHEN r.predicate='RESOLVES_TO' AND r.status='current'
+                        THEN r.object_id END) current_ips,
+                    COUNT(DISTINCT CASE WHEN r.predicate='OBSERVED_AT' AND r.status='historical'
+                        THEN r.object_id END) historical_ips,
+                    COUNT(DISTINCT CASE WHEN r.predicate='USES_NAMESERVER'
+                        THEN r.object_id END) nameservers,
+                    COUNT(DISTINCT CASE WHEN r.predicate='USES_MAIL_EXCHANGER'
+                        THEN r.object_id END) mail_exchangers,
+                    COUNT(DISTINCT CASE WHEN r.predicate='PRESENTS_CERTIFICATE'
+                        THEN r.object_id END) certificates,
+                    COUNT(DISTINCT CASE WHEN r.predicate='ISSUED_BY'
+                        THEN r.object_id END) certificate_issuers,
+                    COUNT(DISTINCT CASE WHEN r.predicate='RUNS_COMPONENT'
+                        THEN r.object_id END) components,
+                    COUNT(DISTINCT CASE WHEN r.predicate='EXPOSES_API'
+                        THEN r.object_id END) api_routes,
+                    COUNT(DISTINCT CASE WHEN r.predicate='DISCOVERED_ROUTE'
+                        THEN r.object_id END) web_routes,
+                    COUNT(DISTINCT CASE WHEN r.predicate='CALLS_EXTERNAL_SERVICE'
+                        THEN r.object_id END) external_services,
+                    COUNT(DISTINCT CASE WHEN r.predicate='DEPENDS_ON_SERVICE'
+                        THEN r.object_id END) platform_services,
+                    COUNT(DISTINCT CASE WHEN r.predicate='PROVIDED_BY'
+                        THEN r.object_id END) platform_service_providers,
+                    COUNT(DISTINCT r.relation_id) relations,
+                    COUNT(DISTINCT CASE WHEN e.scope='supplier' AND e.entity_type='organization'
+                        THEN e.entity_id END) suppliers,
+                    COUNT(DISTINCT CASE WHEN e.entity_type='organization' AND
+                        r.predicate IN ('OPERATED_BY','ASSIGNED_TO') THEN e.entity_id END) providers
+                FROM supply_chain_relations r
+                JOIN supply_chain_entities e ON e.entity_id=r.object_id {where}""", params).fetchone()
+            suppliers = [dict(row) for row in db.execute(f"""SELECT e.display_name name,
+                    e.entity_type type,r.predicate role,COUNT(DISTINCT r.asset_identity) asset_count,
+                    MAX(r.last_seen) last_seen
+                FROM supply_chain_relations r JOIN supply_chain_entities e ON e.entity_id=r.object_id
+                {where} AND e.scope='supplier'
+                    AND e.entity_type='organization'
+                GROUP BY e.entity_id,r.predicate ORDER BY asset_count DESC,e.display_name LIMIT 50""", params).fetchall()]
+        summary = dict(counts) if counts else {
+            "assets": 0, "url_entries": 0, "systems": 0,
+            "current_hosts": 0, "current_ips": 0,
+            "historical_ips": 0, "nameservers": 0, "mail_exchangers": 0,
+            "certificates": 0, "certificate_issuers": 0,
+            "components": 0, "api_routes": 0, "web_routes": 0, "external_services": 0,
+            "platform_services": 0, "platform_service_providers": 0,
+            "relations": 0, "suppliers": 0, "providers": 0}
+        summary["single_provider_dependency"] = bool(
+            summary.get("assets") and summary.get("providers") == 1)
+        return {"summary": summary, "suppliers": suppliers}
+
+    def supply_chain_certificates(self, project_slug: str = "") -> List[Dict[str, Any]]:
+        where = "AND r.project_slug=?" if project_slug else ""
+        params = (project_slug,) if project_slug else ()
+        with self._connect() as db:
+            rows = db.execute(f"""SELECT e.entity_id,e.display_name,e.attributes_json,
+                    COUNT(DISTINCT r.asset_identity) asset_count,MAX(r.last_seen) last_seen
+                FROM supply_chain_relations r
+                JOIN supply_chain_entities e ON e.entity_id=r.object_id
+                WHERE r.predicate='PRESENTS_CERTIFICATE' AND r.status!='stale' {where}
+                GROUP BY e.entity_id ORDER BY last_seen DESC""", params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["attributes"] = json.loads(item.pop("attributes_json") or "{}")
             result.append(item)
         return result
 
@@ -549,7 +1287,7 @@ class ScanDatabase:
                 "intelligence": self.intelligence_overview(),
                 "total_candidate_assets": sum(row["asset_count"] for row in projects)}
 
-    def upsert_lab_report(self, report: Dict[str, Any]):
+    def upsert_lab_report(self, report: Dict[str, Any], include_experiments: bool = True):
         now = time.time()
         node_id = report["node_id"]
         with self._lock, self._connect() as db:
@@ -562,7 +1300,7 @@ class ScanDatabase:
                 (node_id, report.get("name", node_id), report.get("status", "ready"),
                  json.dumps(report.get("capabilities", []), ensure_ascii=False),
                  json.dumps(report.get("metrics", {}), ensure_ascii=False), now, now))
-            for experiment in report.get("experiments", []):
+            for experiment in report.get("experiments", []) if include_experiments else []:
                 db.execute("""INSERT INTO lab_experiments
                     (experiment_id,node_id,project_slug,project_name,version,status,hypothesis,
                      public_observation,reproduction_summary,evidence_json,remediation,
@@ -778,12 +1516,19 @@ class ScanDatabase:
                 "SELECT card_id FROM decision_cards WHERE dedup_key=?", (dedup_key,)).fetchone()
             if existing:
                 # 更新观测（评分/资产数/时间变化）
-                db.execute("""UPDATE decision_cards SET last_seen=?, asset_count=?, score=?, 
-                    change_text=?, evidence_level=?, severity=?, confidence=?
+                db.execute("""UPDATE decision_cards SET last_seen=?, asset_count=?, score=?,
+                    change_text=?,why_worth=?,evidence_says=?,evidence_limits=?,
+                    next_step=?,abort_condition=?,evidence_level=?,severity=?,confidence=?,
+                    source=?,payload_json=?
                     WHERE card_id=?""",
                     (now, card.get("asset_count", 0), card.get("score", 0),
-                     card.get("change_text", ""), card.get("evidence_level", 0),
+                     card.get("change_text", ""), card.get("why_worth", ""),
+                     card.get("evidence_says", ""), card.get("evidence_limits", ""),
+                     card.get("next_step", ""), card.get("abort_condition", ""),
+                     card.get("evidence_level", 0),
                      card.get("severity", "MEDIUM"), card.get("confidence", "medium"),
+                     card.get("source", ""),
+                     json.dumps(card.get("payload", {}), ensure_ascii=False),
                      existing["card_id"]))
                 return False
             db.execute("""INSERT INTO decision_cards
