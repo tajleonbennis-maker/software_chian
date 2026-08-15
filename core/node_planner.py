@@ -20,6 +20,7 @@ import logging
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
 
 import requests
 
@@ -39,13 +40,14 @@ class NodePlanner:
         self._dispatch_lock = threading.Lock()
         self._round_counter = 0
         # Kafka 任务队列（优先投递，broker 不可用时回退 HTTP 推送）
-        try:
-            from core.kafka_pipeline import KafkaProducer
-            kafka_bs = getattr(config, "KAFKA_BOOTSTRAP", "") or "121.41.98.7:9092"
-            self.kafka = KafkaProducer(bootstrap_servers=kafka_bs)
-        except Exception as exc:
-            logger.warning("Kafka 生产者初始化失败: %s", exc)
-            self.kafka = None
+        self.kafka = None
+        if getattr(config, "KAFKA_ENABLED", True):
+            try:
+                from core.kafka_pipeline import KafkaProducer
+                kafka_bs = getattr(config, "KAFKA_BOOTSTRAP", "") or "127.0.0.1:9092"
+                self.kafka = KafkaProducer(bootstrap_servers=kafka_bs)
+            except Exception as exc:
+                logger.warning("Kafka 生产者初始化失败: %s", exc)
         # 在途任务：node_id -> 派发时间戳。派发后节点标记繁忙，直到回传或超时
         self._in_flight: dict = {}
 
@@ -172,72 +174,147 @@ class NodePlanner:
                          project_name: str = "") -> dict:
         """把待分析资产分发给节点集群。
 
-        优先通过 Kafka 投递（节点消费）；Kafka 不可用时回退 HTTP 推送。
-        返回统计；无可用渠道时返回 ok=False。
+        任务总是先进入持久台账。Kafka 可用时发布通知；发布失败时保留为
+        pending，由 Worker 的 HTTP Pull 恢复。两种传输共享同一租约和结果协议。
         """
         if not targets:
             return {"ok": True, "dispatched": 0, "reason": "无待分析资产"}
 
-        # 渠道1: Kafka 投递（节点作为消费者并行消费）
-        if self.kafka and self.kafka.available:
-            chunk = max(1, len(targets) // 4)  # 每任务最多 20 资产
-            tasks = []
-            for i in range(0, len(targets), chunk):
-                batch = targets[i:i + chunk]
-                tasks.append({
-                    "task_id": uuid.uuid4().hex,
-                    "type": "deep_analysis",
+        allowed_domains = tuple(getattr(self.config, "AUTHORIZED_SCAN_DOMAINS", ()) or ())
+        unauthorized_targets = []
+        if allowed_domains:
+            scoped_targets = []
+            for target in targets:
+                host = (urlsplit(str(target)).hostname or "").lower()
+                if any(host == domain or host.endswith("." + domain)
+                       for domain in allowed_domains):
+                    scoped_targets.append(target)
+                else:
+                    unauthorized_targets.append(target)
+            targets = scoped_targets
+        if unauthorized_targets:
+            self.database.pause_research_assets(
+                project_slug, unauthorized_targets,
+                "paused: target outside AUTHORIZED_SCAN_DOMAINS")
+            self.database.brain_event(
+                event_type="warn", action="阻止越界目标",
+                detail=f"{project_name or project_slug} 阻止 {len(unauthorized_targets)} 个目标进入 Worker",
+                reason="目标主机不在生产授权域名白名单",
+                project=project_slug,
+                meta={"blocked_count": len(unauthorized_targets)},
+            )
+        if not targets:
+            return {"ok": False, "dispatched": 0, "scope_blocked": True,
+                    "blocked_assets": len(unauthorized_targets),
+                    "reason": "所有目标均不在生产授权范围"}
+
+        global_limit = int(getattr(self.config, "TASK_QUEUE_MAX_OUTSTANDING", 100))
+        project_limit = int(getattr(self.config, "TASK_QUEUE_MAX_PER_PROJECT", 10))
+        global_outstanding = self.database.node_task_outstanding()
+        project_outstanding = self.database.node_task_outstanding(project_slug)
+        online_workers = self.database.online_worker_count()
+        task_capacity = min(global_limit - global_outstanding,
+                            project_limit - project_outstanding)
+        if online_workers <= 0:
+            task_capacity = 0
+        accepted_limit = max(0, task_capacity) * MAX_ASSETS_PER_NODE
+        accepted_targets = targets[:accepted_limit]
+        deferred_targets = targets[len(accepted_targets):]
+        if deferred_targets:
+            self.database.release_research_assets(
+                project_slug, deferred_targets,
+                "scheduler backpressure: queue capacity or workers unavailable")
+        if not accepted_targets:
+            self.database.brain_event(
+                event_type="wait", action="调度背压",
+                detail=(f"{project_name or project_slug} 暂缓 {len(targets)} 资产 · "
+                        f"全局 {global_outstanding}/{global_limit} · "
+                        f"项目 {project_outstanding}/{project_limit} · Worker {online_workers}"),
+                reason="队列达到水位或没有在线 Worker，资产已安全退回 pending",
+                project=project_slug,
+                meta={"global_outstanding": global_outstanding,
+                      "project_outstanding": project_outstanding,
+                      "online_workers": online_workers},
+            )
+            return {"ok": True, "dispatched": 0, "backpressure": True,
+                    "deferred_assets": len(targets), "online_workers": online_workers}
+
+        # Primary channel: durable pull queue. Workers already poll the brain,
+        # so the brain does not need inbound access to every short-lived node.
+        queued = []
+        published = 0
+        for i in range(0, len(accepted_targets), MAX_ASSETS_PER_NODE):
+            batch = accepted_targets[i:i + MAX_ASSETS_PER_NODE]
+            task_id = uuid.uuid4().hex
+            self.database.enqueue_node_task({
+                "task_id": task_id,
+                "type": "deep_analysis",
+                "params": {
                     "project_slug": project_slug,
                     "project_name": project_name or project_slug,
                     "targets": batch,
                     "online": True,
-                })
-            sent = self.kafka.send_batch(tasks)
-            self.database.brain_event(
-                event_type="action", action="Kafka 任务分发",
-                detail=f"{project_name or project_slug} {len(targets)} 资产 → Kafka {sent['sent']} 任务",
-                reason="节点通过 Kafka 消费 deep_analysis",
-                project=project_slug,
-                meta={"topic": sent.get("topic"), "sent": sent["sent"], "assets": len(targets)})
-            return {"ok": sent["sent"] > 0, "dispatched": sent["sent"],
-                    "channel": "kafka", "assets": len(targets), "sent": sent}
-
-        # 渠道2: HTTP 推送（Kafka 不可用）
-        nodes = self.list_workers()
-        if not nodes:
-            return {"ok": False, "reason": "无可用节点且 Kafka 不可用", "dispatched": 0}
-
-        dispatched = []
-        chunk = max(1, len(targets) // len(nodes))
-        for i in range(0, len(targets), chunk):
-            batch = targets[i:i + chunk]
-            node = self._select_node(project_slug, nodes)
-            if not node:
-                break
-            r = self._dispatch_batch(node, project_slug, project_name or project_slug, batch)
-            dispatched.append(r)
-
+                },
+            })
+            queued.append(task_id)
+            if self.kafka and self.kafka.available:
+                message = {
+                    "task_id": task_id, "type": "deep_analysis",
+                    "project_slug": project_slug,
+                    "project_name": project_name or project_slug,
+                    "targets": batch, "online": True,
+                }
+                if self.kafka.send_task(message):
+                    self.database.mark_node_task_published(task_id)
+                    published += 1
         self.database.brain_event(
-            event_type="action", action="节点分发",
-            detail=f"{project_name or project_slug} {len(targets)} 资产 → {len(dispatched)} 批次 · 节点 {len(nodes)} 台",
-            reason="多节点并行深度分析（deep_analysis）",
+            event_type="action", action="持久队列分发",
+            detail=f"{project_name or project_slug} {len(accepted_targets)} 资产 → {len(queued)} 任务",
+            reason="Kafka 通知 Worker，数据库签发执行租约；未发布任务由 HTTP Pull 恢复",
             project=project_slug,
-            meta={"nodes": len(nodes), "assets": len(targets), "batches": len(dispatched)})
-        return {"ok": True, "dispatched": len(dispatched), "nodes": len(nodes),
-                "assets": len(targets), "batches": dispatched}
+            meta={"channel": "kafka+ledger", "tasks": len(queued),
+                  "published": published, "assets": len(accepted_targets),
+                  "deferred_assets": len(deferred_targets)})
+        return {"ok": True, "dispatched": len(queued), "channel": "kafka+ledger",
+                "published": published, "fallback_pull": len(queued) - published,
+                "assets": len(accepted_targets), "deferred_assets": len(deferred_targets),
+                "blocked_assets": len(unauthorized_targets),
+                "task_ids": queued}
 
     def node_status(self) -> dict:
-        """节点实时状态（供可视化）"""
+        """节点实时状态（供可视化）。
+
+        Workers are outbound-only in the Kafka topology, so their public HTTP
+        port is not a reliable liveness signal. Prefer the durable heartbeat
+        received by the brain and only probe HTTP for nodes that have never
+        reported a heartbeat (backwards compatibility with legacy workers).
+        """
         nodes = []
+        heartbeat_nodes = {}
+        try:
+            heartbeat_nodes = {
+                n.get("node_id"): n
+                for n in self.database.lab_overview().get("nodes", [])
+                if n.get("node_id")
+            }
+        except Exception:
+            logger.exception("读取节点心跳失败，回退 HTTP 健康检查")
         try:
             for n in self.dispatcher.list_nodes():
-                healthy = self._node_healthy(n)
-                nodes.append({
+                heartbeat = heartbeat_nodes.get(n.get("node_id"))
+                healthy = (bool(heartbeat.get("online")) if heartbeat is not None
+                           else self._node_healthy(n))
+                item = {
                     "node_id": n.get("node_id"), "name": n.get("name"),
                     "url": n.get("url"), "status": "ready" if healthy else "offline",
                     "capabilities": n.get("capabilities", []),
-                })
+                    "health_source": "heartbeat" if heartbeat is not None else "http",
+                }
+                if heartbeat is not None:
+                    item["last_heartbeat"] = heartbeat.get("last_heartbeat")
+                    item["metrics"] = heartbeat.get("metrics", {})
+                nodes.append(item)
         except Exception:
-            pass
+            logger.exception("生成节点状态失败")
         return {"nodes": nodes, "total": len(nodes),
                 "online": sum(1 for n in nodes if n.get("status") == "ready")}
