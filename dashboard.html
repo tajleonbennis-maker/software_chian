@@ -294,6 +294,7 @@ a:hover { text-decoration: underline; }
   <div class="sidebar-item" data-view="assets" onclick="switchView('assets')"><span class="icon">🗄️</span>资产库</div>
   <div class="sidebar-item" data-view="leaks" onclick="switchView('leaks')"><span class="icon">🔑</span>凭据泄露</div>
   <div class="sidebar-item" data-view="brain" onclick="switchView('brain')"><span class="icon">🧠</span>大脑监控</div>
+  <div class="sidebar-item" data-view="dlq" onclick="switchView('dlq')"><span class="icon">🧯</span>死信队列</div>
   <div class="sidebar-item" data-view="brainstream" onclick="switchView('brainstream')"><span class="icon">📡</span>大脑思考流</div>
 </div>
 
@@ -484,6 +485,35 @@ a:hover { text-decoration: underline; }
       </div>
     </div>
   </div>
+
+  <!-- ===== 死信队列 ===== -->
+  <div class="view" id="view-dlq">
+    <div class="page-title">死信队列</div>
+    <div class="page-desc">管理员运维区 · 查看终止任务并按次授予一个新的 attempt</div>
+    <div class="card" id="dlq-login" style="display:none">
+      <h3>管理员登录</h3>
+      <div class="query-box">
+        <input class="query-input" id="dlq-admin-password" type="password" autocomplete="current-password" placeholder="管理员密码" onkeydown="if(event.key==='Enter')loginForDlq()">
+        <button class="btn" onclick="loginForDlq()">登录</button>
+      </div>
+      <div class="hint" id="dlq-login-status" style="margin-top:8px">密码只用于建立 HttpOnly 管理会话，不会保存在浏览器本地。</div>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="label">Dead 任务</div><div class="value red" id="dlq-count">-</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <h3>终止任务</h3>
+        <button class="btn-secondary" onclick="loadDlq()">刷新</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="asset-table">
+          <thead><tr><th>任务</th><th>项目</th><th>类型</th><th>目标数</th><th>Attempts</th><th>最后错误</th><th>结束时间</th><th>操作</th></tr></thead>
+          <tbody id="dlq-table"><tr><td colspan="8" class="empty-hint">进入本页面后加载</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ===== 大脑思考流 ===== -->
@@ -536,7 +566,7 @@ a:hover { text-decoration: underline; }
 <script>
 const TOKEN_KEY = 'workbuddy_lab_token';
 const TOKEN = localStorage.getItem(TOKEN_KEY) || '';
-const VIEWS = ['overview','cards','scan','assets','leaks','brain','brainstream'];
+const VIEWS = ['overview','cards','scan','assets','leaks','brain','dlq','brainstream'];
 
 async function api(path, method='GET', body=null) {
   const headers = {'Content-Type': 'application/json'};
@@ -564,6 +594,7 @@ function pct(u,t) { return t ? Math.round(u/t*100) : 0; }
 function switchView(v) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.toggle('active', i.dataset.view === v));
   document.querySelectorAll('.view').forEach(x => x.classList.toggle('active', x.id === 'view-' + v));
+  if (v === 'dlq') loadDlq();
 }
 function setSearch(q) {
   document.getElementById('overview-search').value = q;
@@ -633,6 +664,77 @@ async function decideCard(cardId, decision) {
   } catch(e) { alert('标记失败: ' + e); }
 }
 
+/* ===== 死信队列（管理员） ===== */
+async function loadDlq() {
+  const table = document.getElementById('dlq-table');
+  if (!table) return;
+  table.innerHTML = '<tr><td colspan="8" class="empty-hint">加载中...</td></tr>';
+  try {
+    const d = await api('/api/tasks/dead?limit=100');
+    const login = document.getElementById('dlq-login');
+    if (d.error) {
+      login.style.display = '';
+      document.getElementById('dlq-count').textContent = '-';
+      table.innerHTML = `<tr><td colspan="8" class="empty-hint">${escapeHtml(d.error)}</td></tr>`;
+      return;
+    }
+    login.style.display = 'none';
+    const tasks = d.tasks || [];
+    document.getElementById('dlq-count').textContent = d.count || 0;
+    if (!tasks.length) {
+      table.innerHTML = '<tr><td colspan="8" class="empty-hint">当前没有死信任务</td></tr>';
+      return;
+    }
+    table.innerHTML = tasks.map(t => `
+      <tr>
+        <td class="mono">${escapeHtml(t.task_id)}</td>
+        <td>${escapeHtml(t.project_name || t.project_slug || '-')}</td>
+        <td>${escapeHtml(t.task_type || '-')}</td>
+        <td class="mono">${Number(t.target_count || 0)}</td>
+        <td class="mono">${Number(t.attempt_count || 0)} / ${Number(t.max_attempts || 0)}</td>
+        <td title="${escapeHtml(t.last_error || '')}">${escapeHtml(String(t.last_error || '-').slice(0, 100))}</td>
+        <td>${t.finished_at ? new Date(t.finished_at * 1000).toLocaleString() : '-'}</td>
+        <td><button class="btn-secondary" style="color:var(--accent-orange)" data-task="${escapeHtml(t.task_id)}" onclick="retryDeadTask(this.dataset.task)">重试一次</button></td>
+      </tr>`).join('');
+  } catch (e) {
+    table.innerHTML = `<tr><td colspan="8" class="empty-hint">加载失败：${escapeHtml(String(e))}</td></tr>`;
+  }
+}
+
+async function loginForDlq() {
+  const input = document.getElementById('dlq-admin-password');
+  const status = document.getElementById('dlq-login-status');
+  const password = input.value;
+  if (!password) { status.textContent = '请输入管理员密码'; return; }
+  status.textContent = '正在登录...';
+  const base = window.location.pathname.startsWith('/sc/') ? '/sc' : '';
+  try {
+    const response = await fetch(base + '/api/auth/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({role: 'admin', password})
+    });
+    const data = await response.json();
+    input.value = '';
+    if (!response.ok) { status.textContent = data.error || '登录失败'; return; }
+    status.textContent = '登录成功';
+    await loadDlq();
+  } catch (e) {
+    input.value = '';
+    status.textContent = '登录失败：' + String(e);
+  }
+}
+
+async function retryDeadTask(taskId) {
+  const reason = window.prompt('请输入重试原因（将写入审计记录）');
+  if (reason === null) return;
+  if (!reason.trim()) { alert('必须填写重试原因'); return; }
+  if (!window.confirm(`确认让任务 ${taskId} 获得一次新的执行机会？`)) return;
+  const result = await api('/api/tasks/' + encodeURIComponent(taskId) + '/retry', 'POST', {reason: reason.trim()});
+  if (!result.ok) { alert(result.error || '重试失败'); return; }
+  alert('任务已重新进入 pending，系统只增加了一次 attempt 预算。');
+  await loadDlq();
+}
+
 /* ===== 大脑思考流 ===== */
 const BS_ICON = {think:'🤔', decide:'🎯', action:'⚙️', result:'✅', sync:'📡', warn:'⚠️', error:'❌'};
 async function loadBrainStream() {
@@ -668,7 +770,7 @@ async function loadBrainStream() {
 async function loadOverview() {
   try {
     const [mon, assets, leaks, sc] = await Promise.all([
-      api('/api/monitor/overview'), api('/api/assets?limit=50'), api('/api/leaks/stats'),
+      api('/api/monitor/summary'), api('/api/assets?limit=50'), api('/api/leaks/stats'),
       api('/api/supply-chain/overview')
     ]);
     document.getElementById('kpi-assets').textContent = (sc.total_assets||0) + ' 资产';
@@ -770,7 +872,15 @@ async function loadAssets() {
   const q = document.getElementById('asset-search')?.value.trim() || '';
   const url = q ? '/api/assets?query=' + encodeURIComponent(q) : '/api/assets?limit=100';
   const d = await api(url);
-  document.getElementById('asset-count').textContent = '共 ' + d.total + ' 个';
+  let countText = 'URL入口 ' + d.total + ' 个';
+  if (!q) {
+    const infra = await api('/api/infrastructure-supply-chain/overview?project_slug=owner-chuhaijian');
+    const summary = infra.summary || {};
+    if (!infra.error && summary.url_entries != null) {
+      countText = `当前主机 ${summary.current_hosts||0} · 当前IP ${summary.current_ips||0} · URL入口 ${summary.url_entries||0} · 历史IP ${summary.historical_ips||0} · 平台依赖 ${summary.platform_services||0}`;
+    }
+  }
+  document.getElementById('asset-count').textContent = countText;
   const tbody = document.getElementById('asset-table');
   tbody.innerHTML = '';
   if (!d.assets?.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-hint">暂无资产</td></tr>'; return; }
@@ -829,11 +939,18 @@ async function openAssetDetail(host) {
     }
     if (d.vuln_count) meta.push('漏洞 ' + d.vuln_count);
     if (d.tech_count) meta.push('组件 ' + d.tech_count);
+    if (d.risk_score != null) meta.push('风险分 ' + d.risk_score);
     if (d.project_slug) meta.push('项目 ' + d.project_slug);
     if (d.data_source) meta.push('来源 ' + d.data_source);
     if (d.confidence) meta.push('置信度 ' + d.confidence);
     if (d.analyzed_at) meta.push('分析于 ' + new Date(d.analyzed_at*1000).toLocaleString());
     metaEl.textContent = meta.join(' · ');
+    // 基础设施供应链只在管理员会话中返回；供应商实体不会成为扫描目标。
+    let infrastructure = {};
+    if (d.project_slug && (d.asset?.url || host)) {
+      infrastructure = await api('/api/infrastructure-supply-chain/asset?project_slug=' +
+        encodeURIComponent(d.project_slug) + '&asset=' + encodeURIComponent(d.asset?.url || host));
+    }
     // 渲染各面板
     const vulns = (d.vulnerabilities || []).slice(0, 30).map(v => `
       <div class="vuln-card">
@@ -849,8 +966,28 @@ async function openAssetDetail(host) {
         <span class="k">${escapeHtml(t.name||'')}</span>
         <span class="v">${escapeHtml(t.version||'')}${t.category?' · '+escapeHtml(t.category):''}</span>
       </div>`).join('') || '<div class="hint">无组件指纹</div>';
-    const supplies = (d.supply_chains || []).map(s => `
-      <div class="metric-row"><span class="k">${escapeHtml(s.component||s.name||'')}</span><span class="v">${escapeHtml(s.chain||s.dependency_chain||s.path||'')}</span></div>`).join('') || '<div class="hint">无供应链链数据</div>';
+    const relationLabels = {
+      SERVED_BY:'入口属于', RESOLVES_TO:'DNS 指向', IN_PREFIX:'位于网段',
+      OBSERVED_AT:'历史观测于',
+      ANNOUNCED_BY:'BGP 宣告方', OPERATED_BY:'网络运营方',
+      ASSIGNED_TO:'地址分配给', RESOURCE_MANAGED_BY:'地址资源管理方',
+      USES_NAMESERVER:'使用域名服务器', USES_MAIL_EXCHANGER:'使用邮件服务',
+      CNAME_TO:'别名指向', PRESENTS_CERTIFICATE:'提供证书',
+      ISSUED_BY:'证书签发方', COVERS_DOMAIN:'证书覆盖域名',
+      RUNS_COMPONENT:'运行组件', EXPOSES_API:'暴露 API',
+      DISCOVERED_ROUTE:'发现业务路径', CALLS_EXTERNAL_SERVICE:'依赖外部服务',
+      DEPENDS_ON_SERVICE:'平台依赖', PROVIDED_BY:'服务提供方'
+    };
+    const infraRelations = (infrastructure.relations || []).map(r => `
+      <div class="metric-row">
+        <span class="k">${escapeHtml(r.subject_name||r.subject_key||'')} · ${escapeHtml(relationLabels[r.predicate]||r.predicate||'关联')}</span>
+        <span class="v">${escapeHtml(r.object_name||r.object_key||'')} · ${r.status==='historical'?'历史':r.status==='stale'?'已失效':'当前'} · 置信度 ${Math.round(Number(r.confidence||0)*100)}% · ${escapeHtml(r.source||'')}</span>
+      </div>`).join('');
+    const componentSupplies = (d.supply_chains || []).map(s => `
+      <div class="metric-row"><span class="k">${escapeHtml(s.component||s.name||'')}</span><span class="v">${escapeHtml(s.chain||s.dependency_chain||s.path||'')}</span></div>`).join('');
+    const supplies = infrastructure.error
+      ? '<div class="hint">基础设施供应链需要管理员登录后查看</div>' + (componentSupplies||'')
+      : ((infraRelations ? '<div class="hint" style="margin-bottom:8px">基础设施供应链 · 被动公开数据，不扩大扫描范围</div>' + infraRelations : '') + componentSupplies || '<div class="hint">无供应链关系数据</div>');
     const apis = (d.api_endpoints || []).map(a => {
       const url = a.url || a.endpoint || a.path || '';
       return `<div class="leak-item">
@@ -868,8 +1005,14 @@ async function openAssetDetail(host) {
         <div class="leak-key">${escapeHtml(s.secret_type||s.type||'')}: ${escapeHtml(s.value_masked||s.detail||'')}</div>
         <div class="leak-meta">${escapeHtml(s.source||s.path||s.endpoint||'')}</div>
       </div>`).join('') || '<div class="hint">无敏感信息</div>';
+    const conclusion = (d.finding_summary || []).length ? `
+      <div class="evidence-box" style="border-color:${riskColor};margin-bottom:12px">
+        <strong style="color:${riskColor}">大脑结论 · ${escapeHtml(risk)} ${Number(d.risk_score||0)}/100</strong>
+        <div class="hint" style="margin-top:6px">${(d.finding_summary||[]).map(x=>escapeHtml(x)).join(' · ')}</div>
+        <div class="hint" style="margin-top:4px">置信度：${escapeHtml(d.confidence||'low')}。条件匹配漏洞不等同于已确认可利用。</div>
+      </div>` : '';
     document.getElementById('drawer-content').innerHTML = `
-      <div data-panel="vuln">${vulns}</div>
+      <div data-panel="vuln">${conclusion}${vulns}</div>
       <div data-panel="tech" style="display:none">${techs}</div>
       <div data-panel="supply" style="display:none">${supplies}</div>
       <div data-panel="api" style="display:none">${apis}</div>
@@ -920,6 +1063,11 @@ async function loadLeaks() {
 /* ===== 大脑监控 ===== */
 async function loadMonitor() {
   const d = await api('/api/monitor/overview');
+  if (d.error) {
+    document.getElementById('nodes-grid').innerHTML = '<div class="empty-hint">节点、任务与实验详情需要管理员登录后查看</div>';
+    document.getElementById('topbar-status').textContent = '详细监控已保护';
+    return;
+  }
   const s = d.summary || {};
   document.getElementById('s-nodes').textContent = s.total_nodes || 0;
   document.getElementById('s-online').textContent = s.online_nodes || 0;
