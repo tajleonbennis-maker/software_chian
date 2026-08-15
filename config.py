@@ -46,6 +46,19 @@ class Config:
     RESEARCH_DISCOVERY_SIZE = max(1, int(os.environ.get("RESEARCH_DISCOVERY_SIZE", "500")))
     RESEARCH_ANALYSIS_BATCH = max(1, int(os.environ.get("RESEARCH_ANALYSIS_BATCH", "40")))
     RESEARCH_ANALYSIS_WORKERS = max(1, min(16, int(os.environ.get("RESEARCH_ANALYSIS_WORKERS", "4"))))
+    RESEARCH_ALLOWED_PROJECTS = tuple(
+        value.strip() for value in os.environ.get("RESEARCH_ALLOWED_PROJECTS", "").split(",")
+        if value.strip())
+    AUTHORIZED_SCAN_DOMAINS = tuple(
+        value.strip().lower() for value in os.environ.get("AUTHORIZED_SCAN_DOMAINS", "").split(",")
+        if value.strip())
+    TASK_QUEUE_MAX_OUTSTANDING = max(
+        1, int(os.environ.get("TASK_QUEUE_MAX_OUTSTANDING", "100")))
+    TASK_QUEUE_MAX_PER_PROJECT = max(
+        1, int(os.environ.get("TASK_QUEUE_MAX_PER_PROJECT", "10")))
+    # Production brain is a control plane. Enable only for single-machine dev.
+    BRAIN_LOCAL_EXECUTION_ENABLED = os.environ.get(
+        "BRAIN_LOCAL_EXECUTION_ENABLED", "false").lower() == "true"
     TREND_INTELLIGENCE_ENABLED = os.environ.get("TREND_INTELLIGENCE_ENABLED", "true").lower() == "true"
     TREND_INTELLIGENCE_INTERVAL_SECONDS = max(
         900, int(os.environ.get("TREND_INTELLIGENCE_INTERVAL_SECONDS", "21600"))
@@ -70,6 +83,10 @@ class Config:
 
     # 向执行引擎下发任务的 HTTP 超时（秒）
     NODE_HTTP_TIMEOUT = int(os.environ.get("NODE_HTTP_TIMEOUT", "30"))
+    # Kafka broker used by the Brain task producer. An empty/unreachable broker
+    # automatically falls back to the durable HTTP task queue.
+    KAFKA_ENABLED = os.environ.get("KAFKA_ENABLED", "true").lower() == "true"
+    KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "127.0.0.1:9092")
 
     # ============================================================
     # DeepSeek AI API 配置
@@ -80,6 +97,10 @@ class Config:
     DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
     DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
     RESEARCH_AI_MODEL = os.environ.get("RESEARCH_AI_MODEL", "deepseek-v4-pro")
+    # OpenAI-compatible fallback used automatically when the primary provider fails.
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+    OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+    OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-sol")
     # 是否启用 AI 分析（即使配置了 API Key，也可通过此开关全局关闭）
     AI_ANALYSIS_ENABLED = os.environ.get("AI_ANALYSIS_ENABLED", "true").lower() == "true"
     # AI 单次请求超时时间（秒）
@@ -105,4 +126,3 @@ class Config:
     ALERT_MIN_LEVEL = os.environ.get("ALERT_MIN_LEVEL", "CRITICAL")
     # 是否推送新 SK 泄露（默认开）
     ALERT_NOTIFY_LEAKS = os.environ.get("ALERT_NOTIFY_LEAKS", "true").lower() == "true"
-
