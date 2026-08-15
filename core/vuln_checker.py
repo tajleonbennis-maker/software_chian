@@ -280,14 +280,10 @@ class VulnChecker:
         """
         if not name:
             return ""
-        name_lower = name.lower().strip()
+        name_lower = re.sub(r'\s+', ' ', name.lower().strip())
         # 精确匹配别名
         if name_lower in self._alias_reverse_map:
             return self._alias_reverse_map[name_lower]
-        # 模糊匹配：检查别名是否包含在名称中
-        for alias, standard in self._alias_reverse_map.items():
-            if alias in name_lower or name_lower in alias:
-                return standard
         return name_lower
 
     def _match_component(self, tech_name: str, vuln_component: str) -> bool:
@@ -313,22 +309,9 @@ class VulnChecker:
         if tech_normalized == vuln_normalized:
             return True
 
-        # 包含匹配（一方包含另一方）
-        if vuln_normalized in tech_normalized or tech_normalized in vuln_normalized:
-            return True
-
-        # 分词匹配：将组件名拆分为单词，检查是否有重叠
-        tech_words = set(re.split(r'[\s\-_/\.]+', tech_normalized))
-        vuln_words = set(re.split(r'[\s\-_/\.]+', vuln_normalized))
-        # 过滤掉空字符串和过短的词
-        tech_words = {w for w in tech_words if len(w) > 1}
-        vuln_words = {w for w in vuln_words if len(w) > 1}
-        if tech_words and vuln_words:
-            overlap = tech_words & vuln_words
-            # 如果有有意义的词汇重叠，认为匹配
-            if overlap:
-                return True
-
+        # 不再使用“包含任意一个相同单词”作为产品等价条件。Nginx、Apache、
+        # Server 等词会出现在大量无关产品描述里，宽松匹配会把第三方产品 CVE
+        # 错挂到 Web Server 指纹上。需要支持的命名差异应显式加入别名表。
         return False
 
     # ------------------------------------------------------------------
@@ -807,6 +790,83 @@ class VulnChecker:
 
         return vulns
 
+    @staticmethod
+    def _iter_nvd_cpe_matches(value: Any):
+        """Yield vulnerable cpeMatch records from an NVD configuration tree."""
+        if isinstance(value, dict):
+            for match in value.get("cpeMatch", []) or []:
+                if isinstance(match, dict) and match.get("vulnerable", True):
+                    yield match
+            for child in value.get("nodes", []) or []:
+                yield from VulnChecker._iter_nvd_cpe_matches(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from VulnChecker._iter_nvd_cpe_matches(child)
+
+    @staticmethod
+    def _parse_cpe_identity(criteria: str) -> Tuple[str, str, str]:
+        """Return vendor, product and version from a CPE 2.3 criteria string."""
+        if not criteria.startswith("cpe:2.3:"):
+            return "", "", ""
+        parts = criteria.split(":")
+        if len(parts) < 6:
+            return "", "", ""
+
+        def clean(value: str) -> str:
+            return value.replace("\\_", "_").replace("\\-", "-").replace("\\.", ".")
+
+        return clean(parts[3]), clean(parts[4]), clean(parts[5])
+
+    def _nvd_cpe_applies(self, tech_name: str, installed_version: str,
+                         cpe_match: Dict[str, Any]) -> Tuple[bool, str]:
+        """Validate an NVD CPE product identity and version boundary."""
+        vendor, product, cpe_version = self._parse_cpe_identity(
+            cpe_match.get("criteria") or cpe_match.get("cpe23Uri") or ""
+        )
+        if not product or not installed_version:
+            return False, ""
+
+        readable_product = re.sub(r"[_-]+", " ", product).strip()
+        readable_vendor = re.sub(r"[_-]+", " ", vendor).strip()
+        product_candidates = [readable_product]
+        if readable_vendor:
+            product_candidates.append(f"{readable_vendor} {readable_product}")
+        if not any(self._match_component(tech_name, candidate)
+                   for candidate in product_candidates):
+            return False, ""
+
+        boundaries = (
+            ("versionStartIncluding", lambda cmp: cmp >= 0, ">="),
+            ("versionStartExcluding", lambda cmp: cmp > 0, ">"),
+            ("versionEndIncluding", lambda cmp: cmp <= 0, "<="),
+            ("versionEndExcluding", lambda cmp: cmp < 0, "<"),
+        )
+        labels = []
+        for key, predicate, operator in boundaries:
+            boundary = str(cpe_match.get(key) or "").strip()
+            if not boundary:
+                continue
+            if not predicate(self._compare_versions(installed_version, boundary)):
+                return False, ""
+            labels.append(f"{operator} {boundary}")
+
+        if cpe_version not in ("", "*", "-"):
+            if self._compare_versions(installed_version, cpe_version) != 0:
+                return False, ""
+            labels.append(f"= {cpe_version}")
+
+        return True, ", ".join(labels) or "CPE product match (all listed versions)"
+
+    def _matching_nvd_configuration(self, cve: Dict[str, Any], tech_name: str,
+                                    installed_version: str) -> str:
+        """Return the matched CPE boundary, or an empty string if not applicable."""
+        for cpe_match in self._iter_nvd_cpe_matches(cve.get("configurations", [])):
+            applies, affected = self._nvd_cpe_applies(
+                tech_name, installed_version, cpe_match)
+            if applies:
+                return affected
+        return ""
+
     def _check_nvd(self, technologies: List, seen_cve_ids: set) -> List[Vulnerability]:
         """通过 NVD API 进行在线漏洞查询
 
@@ -861,6 +921,14 @@ class VulnChecker:
                     if cve_id in seen_cve_ids:
                         continue
 
+                    # keywordSearch is discovery only. A result is actionable only
+                    # when NVD declares a vulnerable CPE for this exact product and
+                    # the observed version satisfies that CPE's boundaries.
+                    affected_versions = self._matching_nvd_configuration(
+                        cve, tech_name, tech_version)
+                    if not affected_versions:
+                        continue
+
                     # 提取 CVSS 分数和严重等级
                     cvss_score = 0.0
                     severity = "UNKNOWN"
@@ -891,7 +959,7 @@ class VulnChecker:
                         cve_id=cve_id,
                         component=tech_name,
                         installed_version=tech_version,
-                        affected_versions="（见 NVD 详情）",
+                        affected_versions=affected_versions,
                         severity=severity.upper() if severity else "UNKNOWN",
                         cvss_score=cvss_score,
                         title=cve_id,
