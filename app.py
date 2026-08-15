@@ -55,6 +55,10 @@ from core.exploit_finder import ExploitFinder
 from core.api_scanner import APIScanner
 from core.exposure_discovery import FrontendExposureDiscovery
 from core.ownership_discovery import OwnershipDiscovery
+from core.infrastructure_intelligence import (
+    PassiveInfrastructureCollector, declared_services_graph, evidence_supply_chain_graph,
+    generate_infrastructure_decision_cards, merge_graphs,
+)
 from core.research_brain import ResearchBrain
 from core.dispatcher import TaskDispatcher
 # 导入 AI 分析器（DeepSeek API，可选模块，未配置 API Key 时自动禁用）
@@ -68,6 +72,77 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
 logger = logging.getLogger("SupplyChainAnalyzer")
+
+
+def configured_platform_dependency_graph() -> Dict[str, Any]:
+    """Return credential-free runtime provider declarations."""
+    return declared_services_graph("Supply Chain Brain", [
+        {"name": "FOFA", "provider": "FOFA", "base_url": "https://fofa.info",
+         "enabled": bool(Config.FOFA_KEY), "purpose": "public asset discovery"},
+        {"name": "DeepSeek", "provider": "DeepSeek",
+         "base_url": Config.DEEPSEEK_BASE_URL,
+         "enabled": bool(Config.DEEPSEEK_API_KEY and Config.AI_ANALYSIS_ENABLED),
+         "purpose": "primary research analysis", "model": Config.DEEPSEEK_MODEL},
+        {"name": "OpenAI", "provider": "OpenAI",
+         "base_url": Config.OPENAI_BASE_URL, "enabled": bool(Config.OPENAI_API_KEY),
+         "purpose": "AI analysis fallback", "model": Config.OPENAI_MODEL},
+        {"name": "Kafka", "provider": "Self-hosted",
+         "base_url": "", "enabled": bool(Config.KAFKA_ENABLED),
+         "purpose": "optional task transport"},
+    ])
+
+
+def enrich_passive_infrastructure(report: Dict[str, Any], task_context: Dict[str, Any]):
+    """Build supplier relationships for already-authorized completed assets.
+
+    This hook performs passive DNS/RDAP/BGP enrichment only.  It never creates
+    research assets and therefore cannot expand the Worker's active scan scope.
+    """
+    project_slug = str(task_context.get("project_slug") or "")
+    allowed_projects = set(Config.RESEARCH_ALLOWED_PROJECTS or ())
+    if allowed_projects and project_slug not in allowed_projects:
+        return
+    collector = PassiveInfrastructureCollector()
+    for experiment in report.get("experiments", []):
+        if experiment.get("status") != "completed":
+            continue
+        for item in experiment.get("evidence", []):
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or item.get("url") or "").strip()
+            if not target:
+                continue
+            parsed = urlparse(target if "://" in target else "//" + target)
+            hostname = (parsed.hostname or "").lower()
+            if Config.AUTHORIZED_SCAN_DOMAINS and not any(
+                    hostname == domain or hostname.endswith("." + domain)
+                    for domain in Config.AUTHORIZED_SCAN_DOMAINS):
+                logger.warning("供应链被动补全跳过越界目标: %s", target)
+                continue
+            asset = item.get("asset") if isinstance(item.get("asset"), dict) else {}
+            known_ips = [value for value in (item.get("ip"), asset.get("ip")) if value]
+            graph = merge_graphs(
+                collector.collect(target, known_ips=known_ips),
+                evidence_supply_chain_graph(target, item),
+            )
+            counts = scan_database.upsert_supply_chain_graph(
+                project_slug, target.rstrip("/").lower(), graph)
+            scan_database.brain_event(
+                event_type="result", action="补全基础设施供应链",
+                detail=(f"{hostname} 形成 {len(graph.get('relations', []))} 条关系 · "
+                        f"新增实体 {counts['new_entities']}"),
+                reason="基于 DNS、RDAP 与 BGP 的被动公开数据",
+                project=project_slug,
+                meta={"target": target, **counts, "errors": graph.get("errors", [])[:5]},
+            )
+    card_counts = generate_infrastructure_decision_cards(scan_database, project_slug)
+    scan_database.brain_event(
+        event_type="decision", action="评估基础设施依赖",
+        detail=(f"供应链研判卡新增 {card_counts['created']} · "
+                f"更新 {card_counts['updated']}"),
+        reason="根据当前 DNS、BGP、RDAP、TLS 与 Worker 证据形成可行动结论",
+        project=project_slug, meta=card_counts,
+    )
 
 
 def identify_project_family(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -181,6 +256,9 @@ tasks: Dict[str, Dict[str, Any]] = {}
 # 线程锁，保护 tasks 字典的并发访问
 tasks_lock = threading.Lock()
 scan_database = ScanDatabase(Config.DATABASE_PATH)
+_platform_project = next(iter(Config.RESEARCH_ALLOWED_PROJECTS), "system")
+scan_database.upsert_supply_chain_graph(
+    _platform_project, "system:supply-chain-brain", configured_platform_dependency_graph())
 
 # 注入数据库到告警模块（outbox 持久化）
 from core.notifier import set_database, flush_outbox
@@ -538,6 +616,28 @@ def _alert_outbox_worker():
 
 
 threading.Thread(target=_alert_outbox_worker, daemon=True).start()
+
+
+def _task_lease_reaper_worker():
+    """Recover abandoned Worker attempts independently of task claiming."""
+    while True:
+        try:
+            result = scan_database.reap_expired_node_tasks()
+            if result.get("expired"):
+                scan_database.brain_event(
+                    event_type="warn", action="回收过期任务租约",
+                    detail=(f"过期 {result['expired']} · 等待重试 {result['retry_wait']} · "
+                            f"进入 dead {result['dead']}"),
+                    reason="周期性租约回收，避免任务永久停留 running",
+                    meta=result,
+                )
+        except Exception as exc:
+            logger.warning("任务租约回收失败: %s", exc)
+        time.sleep(30)
+
+
+threading.Thread(target=_task_lease_reaper_worker, daemon=True,
+                 name="task-lease-reaper").start()
 
 # 大脑端任务分发器：向执行引擎（worker 节点）下发任务并回收结果
 task_dispatcher = TaskDispatcher(scan_database, Config)
@@ -1115,6 +1215,9 @@ def api_ai_config():
         "analysis_enabled": Config.AI_ANALYSIS_ENABLED,
         # 使用的模型名称
         "model": Config.DEEPSEEK_MODEL,
+        # 主模型失败时自动使用的 OpenAI-compatible 备用模型
+        "fallback_configured": bool(Config.OPENAI_API_KEY),
+        "fallback_model": Config.OPENAI_MODEL if Config.OPENAI_API_KEY else "",
         # 请求超时时间
         "timeout": Config.AI_TIMEOUT,
     })
@@ -1358,6 +1461,8 @@ def api_research_overview():
     seed_map = {p.get("slug"): p for p in SEED_PROJECTS}
     projects = []
     for project in overview["projects"]:
+        if not project.get("enabled"):
+            continue
         item = {
             key: project.get(key) for key in (
                 "slug", "name", "repository", "upstream", "license", "category",
@@ -1381,7 +1486,7 @@ def api_research_overview():
         "enabled": Config.RESEARCH_BRAIN_ENABLED,
         "model": Config.RESEARCH_AI_MODEL if Config.DEEPSEEK_API_KEY else "规则回退",
         "interval_seconds": Config.RESEARCH_INTERVAL_SECONDS,
-        "total_candidate_assets": overview["total_candidate_assets"],
+        "total_candidate_assets": sum(project.get("asset_count") or 0 for project in projects),
         "projects": projects, "runs": runs,
         "trends": {
             "signals": overview.get("intelligence", {}).get("signals", []),
@@ -1391,6 +1496,7 @@ def api_research_overview():
 
 
 @app.route("/api/lab/overview")
+@require_admin
 def api_lab_overview():
     return jsonify(scan_database.lab_overview())
 
@@ -1460,10 +1566,100 @@ def api_nodes():
     return jsonify({"nodes": nodes})
 
 
+@app.route("/api/tasks/assign")
+def api_tasks_assign():
+    """Lease one durable task to a worker (outbound-only worker topology)."""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    node_id = (request.args.get("node_id") or request.headers.get("X-Node-Id") or "").strip()
+    if not node_id:
+        return jsonify({"error": "node_id required"}), 400
+    task_id = (request.args.get("task_id") or "").strip()
+    task = scan_database.claim_node_task(node_id, lease_seconds=300, task_id=task_id)
+    return jsonify({"task": task})
+
+
+@app.route("/api/tasks/lease/renew", methods=["POST"])
+def api_tasks_lease_renew():
+    """Renew one active Worker attempt lease."""
+    if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    node_id = (payload.get("node_id") or request.headers.get("X-Node-Id") or "").strip()
+    task_id = (payload.get("task_id") or "").strip()
+    attempt_id = (payload.get("attempt_id") or "").strip()
+    if not node_id or not task_id or not attempt_id:
+        return jsonify({"error": "node_id, task_id and attempt_id required"}), 400
+    ok = scan_database.renew_node_task_lease(
+        task_id, attempt_id, node_id, lease_seconds=300)
+    return jsonify({"ok": ok}), (200 if ok else 409)
+
+
+@app.route("/api/tasks/<task_id>/attempts")
+@require_admin
+def api_task_attempts(task_id):
+    """Admin-only task attempt timeline; payloads and evidence are omitted."""
+    attempts = scan_database.node_task_attempts(task_id)
+    return jsonify({"task_id": task_id, "attempts": attempts})
+
+
+@app.route("/api/tasks/dead")
+@require_admin
+def api_dead_tasks():
+    """Admin-only dead-letter queue view; target and result payloads are omitted."""
+    try:
+        limit = min(200, max(1, int(request.args.get("limit", 50))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+    project_slug = (request.args.get("project_slug") or "").strip()
+    tasks = scan_database.dead_node_tasks(limit=limit, project_slug=project_slug)
+    return jsonify({"tasks": tasks, "count": len(tasks)})
+
+
+@app.route("/api/tasks/<task_id>/retry", methods=["POST"])
+@require_admin
+def api_retry_dead_task(task_id):
+    """Grant exactly one additional attempt to a terminal dead-letter task."""
+    payload = request.get_json(silent=True) or {}
+    reason = str(payload.get("reason") or "管理员人工重试").strip()[:500]
+    retried = scan_database.retry_dead_node_task(task_id)
+    if not retried:
+        return jsonify({"ok": False, "error": "task not found or not dead"}), 409
+    scan_database.brain_event(
+        event_type="action", action="重试死信任务",
+        detail=(f"任务 {task_id} 已重新进入 pending · "
+                f"attempt {retried['attempt_count'] + 1}/{retried['max_attempts']}"),
+        reason=reason, meta={"task_id": task_id, **retried},
+    )
+    return jsonify({"ok": True, "task": retried})
+
+
 # ============================================================
 # 大脑端：实时监控 / 数据可视化 / 对话接口
 # ============================================================
+def _monitor_summary() -> Dict[str, Any]:
+    lab = scan_database.lab_overview()
+    nodes = lab.get("nodes", [])
+    experiments = lab.get("experiments", [])
+    return {
+        "total_nodes": len(nodes),
+        "online_nodes": sum(1 for node in nodes if node.get("online")),
+        "total_experiments": len(experiments),
+        "completed_experiments": sum(
+            1 for experiment in experiments if experiment.get("status") == "completed"),
+        "error_experiments": sum(
+            1 for experiment in experiments if experiment.get("status") == "error"),
+    }
+
+
+@app.route("/api/monitor/summary")
+def api_monitor_summary():
+    """Small public health response without node, task or evidence details."""
+    return jsonify({"status": "ok", "summary": _monitor_summary()})
+
+
 @app.route("/api/monitor/overview")
+@require_admin
 def api_monitor_overview():
     """实时监控总览：各节点在线状态 + 最近任务 + 实验统计"""
     lab = scan_database.lab_overview()
@@ -1504,11 +1700,14 @@ def api_monitor_overview():
             },
         })
 
-    return jsonify({"summary": summary, "nodes": node_status, "recent_tasks": tasks,
+    return jsonify({"summary": summary, "nodes": node_status,
+                    "worker_queue": scan_database.node_task_overview(),
+                    "recent_tasks": tasks,
                     "recent_experiments": experiments[:20]})
 
 
 @app.route("/api/monitor/node/<node_id>")
+@require_admin
 def api_monitor_node(node_id):
     """单个节点详情（从数据库 lab_nodes 查）"""
     lab = scan_database.lab_overview()
@@ -1519,6 +1718,7 @@ def api_monitor_node(node_id):
 
 
 @app.route("/api/experiments")
+@require_admin
 def api_experiments():
     """实验结果列表（含完整 evidence），支持 ?node_id= 过滤"""
     lab = scan_database.lab_overview()
@@ -1550,6 +1750,7 @@ def api_experiments():
 
 
 @app.route("/api/experiments/<experiment_id>")
+@require_admin
 def api_experiment_detail(experiment_id):
     """单个实验结果详情"""
     lab = scan_database.lab_overview()
@@ -1578,8 +1779,11 @@ def api_assets():
     try:
         conn = db._connect()
         rows = conn.execute(
-            "SELECT asset_json, project_slug, analysis_json, analysis_status, analyzed_at "
-            "FROM research_assets ORDER BY last_seen DESC LIMIT ?",
+            "SELECT a.asset_json, a.project_slug, a.analysis_json, a.analysis_status, a.analyzed_at "
+            "FROM research_assets a JOIN research_projects p ON p.slug=a.project_slug "
+            "WHERE p.enabled=1 ORDER BY "
+            "CASE WHEN a.analysis_status='completed' AND a.analysis_json IS NOT NULL THEN 0 ELSE 1 END, "
+            "a.analyzed_at DESC, a.last_seen DESC LIMIT ?",
             (limit * 3,)).fetchall()
         conn.close()
         for row in rows:
@@ -1663,15 +1867,17 @@ def api_asset_detail():
         "asset": None, "technologies": [], "supply_chains": [], "vulnerabilities": [],
         "exploits": [], "api_endpoints": [], "api_report": None,
         "exposure_findings": [], "ownership_profile": {},
-        "vuln_count": 0, "tech_count": 0, "risk_level": "INFO",
+        "vuln_count": 0, "tech_count": 0, "risk_level": "INFO", "risk_score": 0,
+        "confidence": "low", "finding_summary": [],
         "analysis_status": "", "analyzed_at": 0, "source": "database",
     }
     # 1. 从 research_assets 的 analysis_json 取（前端路由暴露 / 项目确认等）
     try:
         conn = db._connect()
         row = conn.execute(
-            "SELECT asset_json, analysis_json, analysis_status, analyzed_at, project_slug "
-            "FROM research_assets WHERE asset_json LIKE ? ORDER BY analyzed_at DESC LIMIT 1",
+            "SELECT a.asset_json, a.analysis_json, a.analysis_status, a.analyzed_at, a.project_slug "
+            "FROM research_assets a JOIN research_projects p ON p.slug=a.project_slug "
+            "WHERE p.enabled=1 AND a.asset_json LIKE ? ORDER BY a.analyzed_at DESC LIMIT 1",
             ("%" + host + "%",)).fetchone()
         if row:
             try:
@@ -1681,7 +1887,8 @@ def api_asset_detail():
                     detail.update({k: an.get(k) for k in (
                         "technologies", "supply_chains", "vulnerabilities", "exploits",
                         "api_endpoints", "api_report", "exposure_findings",
-                        "ownership_profile", "vuln_count", "tech_count", "risk_level")})
+                        "ownership_profile", "vuln_count", "tech_count", "risk_level",
+                        "risk_score", "confidence", "finding_summary")})
                     detail["analysis_status"] = row["analysis_status"] or ""
                     detail["analyzed_at"] = row["analyzed_at"] or 0
                     detail["project_slug"] = row["project_slug"]
@@ -1760,24 +1967,28 @@ def api_asset_detail():
     # 汇总风险等级：根据漏洞严重程度推导
     if not detail.get("risk_level") or detail["risk_level"] == "INFO":
         vulns = detail.get("vulnerabilities") or []
-        if any((v.get("severity") or "").upper() == "CRITICAL" for v in vulns):
+        verified = [v for v in vulns if
+                    (v.get("verification_status") or "suspected").lower() == "actively_verified"]
+        conditions = [v for v in vulns if
+                      (v.get("verification_status") or "suspected").lower() == "condition_matched"]
+        if any((v.get("severity") or "").upper() == "CRITICAL" for v in verified):
             detail["risk_level"] = "CRITICAL"
-        elif any((v.get("severity") or "").upper() in ("HIGH",) for v in vulns):
+        elif any((v.get("severity") or "").upper() == "HIGH" for v in verified):
             detail["risk_level"] = "HIGH"
-        elif vulns:
+        elif verified or conditions:
             detail["risk_level"] = "MEDIUM"
         elif detail.get("exposure_findings") or detail.get("sensitive_hits") or detail.get("credential_leaks"):
             detail["risk_level"] = "LOW"
 
     # 置信度推导（Grok 建议：指纹多特征命中=高；仅 title/URL 模糊=低）
-    conf = "low"
-    if detail.get("vulnerabilities") or detail.get("technologies"):
-        conf = "high"
-    elif detail.get("api_endpoints") or detail.get("exposure_findings") or detail.get("credential_leaks"):
-        conf = "medium"
-    elif detail.get("asset"):
+    if not detail.get("confidence"):
         conf = "low"
-    detail["confidence"] = conf
+        if any((v.get("verification_status") or "").lower() == "actively_verified"
+               for v in detail.get("vulnerabilities") or []):
+            conf = "high"
+        elif detail.get("api_endpoints") or detail.get("exposure_findings") or detail.get("credential_leaks"):
+            conf = "medium"
+        detail["confidence"] = conf
     # 数据来源标签：FOFA / 主动探测 / 实验
     detail["data_source"] = "测绘平台" if detail.get("source") == "database" else "主动探测"
     return jsonify(detail)
@@ -1811,7 +2022,8 @@ def api_supply_chain_overview_data() -> Dict[str, Any]:
     try:
         conn = db._connect()
         rows = conn.execute(
-            "SELECT asset_json, analysis_json, analysis_status FROM research_assets").fetchall()
+            "SELECT a.asset_json, a.analysis_json, a.analysis_status FROM research_assets a "
+            "JOIN research_projects p ON p.slug=a.project_slug WHERE p.enabled=1").fetchall()
         conn.close()
         for row in rows:
             total_assets += 1
@@ -1952,6 +2164,8 @@ def generate_decision_cards() -> int:
     try:
         overview = scan_database.research_overview()
         for p in (overview.get("projects") or []):
+            if not p.get("enabled"):
+                continue
             ac = p.get("asset_count") or 0
             if ac <= 0:
                 continue
@@ -1980,6 +2194,8 @@ def generate_decision_cards() -> int:
 
     # 3. 热搜变化研判卡：新出现的 trend-* 项目
     try:
+        if not Config.TREND_INTELLIGENCE_ENABLED:
+            raise StopIteration
         overview = scan_database.research_overview()
         signals = (overview.get("intelligence") or {}).get("signals", []) or []
         for s in signals[:20]:
@@ -2005,6 +2221,8 @@ def generate_decision_cards() -> int:
             )
             if db.card_insert(card):
                 cards_created += 1
+    except StopIteration:
+        pass
     except Exception as exc:
         logger.warning("生成热搜研判卡失败: %s", exc)
 
@@ -2451,16 +2669,16 @@ def api_chat():
         # 提取查询：去掉命令前缀
         for kw in ("扫描", "搜索", "查找", "fofa", "资产", "发现", "一下", "的", "用", "查询"):
             message = message.replace(kw, " ")
-        params["query"] = message.strip() or 'app="NGINX"'
+        params["query"] = message.strip() or 'domain="chuhaijian.com"'
     elif any(k in msg_lower for k in ("漏洞", "vuln", "检测")):
         task_type = "vuln_check"
-        params["targets"] = ["https://github.com", "https://www.baidu.com"]
+        params["targets"] = ["https://www.chuhaijian.com/sc"]
     elif any(k in msg_lower for k in ("api", "接口")):
         task_type = "api_scan"
-        params["targets"] = ["https://github.com"]
+        params["targets"] = ["https://www.chuhaijian.com/sc"]
     elif any(k in msg_lower for k in ("技术", "tech", "指纹")):
         task_type = "tech_detect"
-        params["targets"] = ["https://github.com", "https://www.baidu.com"]
+        params["targets"] = ["https://www.chuhaijian.com/sc"]
 
     if task_type:
         task = {"type": task_type, "params": params}
@@ -2480,6 +2698,39 @@ def api_chat():
     return jsonify({"ok": True, "intent": "help", "reply": reply})
 
 
+def _finalize_worker_value(task_context: Dict[str, Any]):
+    """Convert a completed Worker task into project-level product output."""
+    project_slug = task_context.get("project_slug", "")
+    if not project_slug:
+        return
+    try:
+        overview = scan_database.research_overview()
+        project = next((row for row in overview.get("projects", [])
+                        if row.get("slug") == project_slug and row.get("enabled")), None)
+        if not project:
+            return
+        research_brain._analyze_project_results(project)
+        cards_created = generate_decision_cards()
+        refreshed = scan_database.research_overview()
+        updated_project = next((row for row in refreshed.get("projects", [])
+                                if row.get("slug") == project_slug), {})
+        insight = updated_project.get("insight") or {}
+        scan_database.brain_event(
+            event_type="result", action="形成研究结论",
+            detail=(f"{project.get('name', project_slug)} 已完成项目复盘 · "
+                    f"研判卡新增 {cards_created}"),
+            reason="Worker 原始证据已转化为风险结论、项目洞察和待研判事项",
+            project=project_slug,
+            ai_thought=str(insight.get("summary") or insight.get("headline") or "")[:500],
+            meta={"task_id": task_context.get("task_id"),
+                  "cards_created": cards_created,
+                  "analyzed_count": updated_project.get("analyzed_count", 0)},
+        )
+    except Exception:
+        logger.exception("Worker 结果价值化失败: project=%s task=%s",
+                         project_slug, task_context.get("task_id"))
+
+
 @app.route("/api/lab/report", methods=["POST"])
 def api_lab_report():
     if not Config.LAB_REPORT_TOKEN or request.headers.get("X-Lab-Token") != Config.LAB_REPORT_TOKEN:
@@ -2487,7 +2738,31 @@ def api_lab_report():
     report = request.get_json(silent=True) or {}
     if not report.get("node_id"):
         return jsonify({"error": "node_id required"}), 400
-    scan_database.upsert_lab_report(report)
+    # Reconcile the durable task ledger and research asset state. This is
+    # idempotent for repeated reports from a worker after a network timeout.
+    # A stale attempt may update its node heartbeat, but it must never write
+    # experiments, assets, or credential findings.
+    report_task_id = report.get("task_id", "")
+    report_attempt_id = report.get("attempt_id", "")
+    report_experiments = report.get("experiments", [])
+    task_context = scan_database.node_task_summary(report_task_id) if report_task_id else None
+    should_finalize = bool(task_context and task_context.get("status") in ("leased", "running")
+                           and report_experiments
+                           and report_experiments[0].get("status") == "completed")
+    if report_task_id and report_attempt_id and report_experiments:
+        scan_database.upsert_lab_report(report, include_experiments=False)
+        if not scan_database.complete_node_task(
+                report_task_id, report_attempt_id, report_experiments[0]):
+            return jsonify({"error": "stale or unknown task attempt"}), 409
+        scan_database.upsert_lab_report(report)
+        if should_finalize and task_context:
+            threading.Thread(
+                target=enrich_passive_infrastructure,
+                args=(report, task_context), daemon=True,
+                name=f"supply-chain-{report_task_id[:12]}",
+            ).start()
+    else:
+        scan_database.upsert_lab_report(report)
 
     # 解析 evidence 中的凭据泄露（api_crawl 任务的 secrets）→ 写入 credential_leaks 表
     node_id = report.get("node_id", "")
@@ -2593,7 +2868,32 @@ def api_lab_report():
     except Exception as exc:
         logger.warning("CRITICAL 告警推送失败: %s", exc)
 
+    if should_finalize and task_context:
+        threading.Thread(
+            target=_finalize_worker_value, args=(task_context,), daemon=True,
+            name=f"value-{report_task_id[:8]}",
+        ).start()
+
     return jsonify({"ok": True, "leaks_ingested": leak_count})
+
+
+@app.route("/api/infrastructure-supply-chain/overview")
+@require_admin
+def api_infrastructure_supply_chain_overview():
+    """Internal supplier concentration view; never returns Worker credentials."""
+    project_slug = (request.args.get("project_slug") or "").strip()
+    return jsonify(scan_database.supply_chain_overview(project_slug))
+
+
+@app.route("/api/infrastructure-supply-chain/asset")
+@require_admin
+def api_infrastructure_supply_chain_asset():
+    """Internal evidence-backed infrastructure relationships for one asset."""
+    project_slug = (request.args.get("project_slug") or "").strip()
+    asset_identity = (request.args.get("asset") or "").strip().rstrip("/").lower()
+    if not project_slug or not asset_identity:
+        return jsonify({"error": "project_slug and asset are required"}), 400
+    return jsonify(scan_database.supply_chain_for_asset(project_slug, asset_identity))
 
 # ============================================================
 # 定期清理过期任务（简单的内存管理）
