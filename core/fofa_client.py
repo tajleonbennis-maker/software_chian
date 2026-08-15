@@ -49,9 +49,23 @@ class Asset:
             if not self.url:
                 self.url = raw_host.rstrip("/")
         elif not self.url and raw_host:
+            # FOFA 的 host 可能已带端口（如 43.128.79.52:8002），避免端口重复拼接
+            host_port = self.host
+            embedded_port = None
+            try:
+                # 提取 host 内嵌端口（IPv6 除外）
+                if host_port.count(":") == 1 and host_port.split(":")[-1].isdigit():
+                    host_head, embedded_port = host_port.rsplit(":", 1)
+                    embedded_port = int(embedded_port)
+            except ValueError:
+                embedded_port = None
+            if embedded_port:
+                self.host = host_head
+                if not self.port:
+                    self.port = embedded_port
             default_port = 443 if self.protocol == "https" else 80
             port_suffix = f":{self.port}" if self.port and self.port != default_port else ""
-            self.url = f"{self.protocol or 'http'}://{raw_host}{port_suffix}"
+            self.url = f"{self.protocol or 'http'}://{self.host}{port_suffix}"
 
     def to_dict(self) -> Dict[str, Any]:
         """将资产对象转换为字典，便于序列化"""
