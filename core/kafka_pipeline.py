@@ -18,12 +18,13 @@ Topic 设计：
 """
 import json
 import logging
+import os
 import threading
 import time
 
 logger = logging.getLogger("KafkaPipeline")
 
-DEFAULT_BOOTSTRAP = "121.41.98.7:9092"
+DEFAULT_BOOTSTRAP = "127.0.0.1:9092"
 DEFAULT_TOPIC = "supply-chain-tasks"
 
 
@@ -116,12 +117,27 @@ class KafkaConsumer:
                 self.topic,
                 bootstrap_servers=self.bootstrap,
                 group_id=self.group_id,
-                value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+                # Decode inside the consume loop so one legacy/corrupt record
+                # cannot poison the partition and spin a worker at 100% CPU.
+                value_deserializer=None,
                 auto_offset_reset="earliest",
                 enable_auto_commit=False,
                 session_timeout_ms=10000,
                 heartbeat_interval_ms=3000,
-                max_poll_records=3,
+                # The broker version is managed with this deployment. Avoid
+                # auto-version probing, which can exhaust its tiny bootstrap
+                # deadline on high-latency workers before the first request.
+                api_version=(3, 6, 0),
+                request_timeout_ms=30000,
+                socket_connection_setup_timeout_ms=30000,
+                socket_connection_setup_timeout_max_ms=60000,
+                # A deep scan is intentionally synchronous and can run for a
+                # long time. Keep the partition lease while that single task
+                # is executing instead of triggering a rebalance every five
+                # minutes (Kafka's default max poll interval).
+                max_poll_interval_ms=int(os.environ.get(
+                    "KAFKA_MAX_POLL_INTERVAL_MS", "14400000")),
+                max_poll_records=1,
                 consumer_timeout_ms=2000,
             )
             return True
@@ -150,16 +166,28 @@ class KafkaConsumer:
                             if self._stop.is_set():
                                 return
                             try:
-                                task = msg.value
+                                try:
+                                    raw = msg.value.decode("utf-8") if isinstance(msg.value, bytes) else msg.value
+                                    task = json.loads(raw) if isinstance(raw, str) else raw
+                                    if not isinstance(task, dict):
+                                        raise ValueError("task payload must be a JSON object")
+                                except Exception as exc:
+                                    logger.error("跳过损坏 Kafka 消息 topic=%s partition=%s offset=%s: %s",
+                                                 msg.topic, msg.partition, msg.offset, exc)
+                                    self._consumer.commit()
+                                    continue
                                 ok = handle_task(task)
                                 if ok:
                                     self._consumer.commit()
                                 else:
-                                    # 处理失败：交给其他消费者重试
-                                    self._consumer.commit()
+                                    # Do not acknowledge failed work. Rewind so
+                                    # it can be retried by this consumer group.
+                                    self._consumer.seek(_tp, msg.offset)
+                                    time.sleep(1)
                             except Exception as exc:
                                 logger.warning("消费任务异常: %s", exc)
-                                self._consumer.commit()
+                                self._consumer.seek(_tp, msg.offset)
+                                time.sleep(1)
                 except Exception as exc:
                     logger.warning("Kafka 消费循环异常: %s", exc)
                     time.sleep(3)
