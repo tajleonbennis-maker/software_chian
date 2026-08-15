@@ -17,6 +17,7 @@ class ExposureFinding:
     sensitive_field_types: List[str] = field(default_factory=list)
     risk_level: str = "info"
     evidence: str = ""
+    confirmed_secret: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -28,6 +29,7 @@ class ExposureFinding:
             "sensitive_field_types": self.sensitive_field_types,
             "risk_level": self.risk_level,
             "evidence": self.evidence,
+            "confirmed_secret": self.confirmed_secret,
         }
 
 
@@ -95,12 +97,21 @@ class FrontendExposureDiscovery:
             fields = self._detect_sensitive_fields(response["text"])
             accessible = response["status_code"] == 200
             sensitive_route = bool(re.search(r"/(settings|admin|manage|config|internal|debug)(/|$)", urlsplit(url).path, re.I))
-            risk = "high" if accessible and fields else "medium" if accessible and sensitive_route else "info"
-            evidence = "公开页面包含已脱敏的敏感配置字段类型" if fields else "公开可达的管理/配置路由" if accessible and sensitive_route else "发现前端路由"
+            # Field labels such as "password" or "api_key" are common in login
+            # forms and settings UIs. They describe an attack surface, not a
+            # credential leak. Actual values are handled by the dedicated secret
+            # scanners and must never be inferred from labels alone.
+            risk = "medium" if accessible and sensitive_route else "info"
+            evidence = (
+                "公开页面包含敏感字段名称（未发现凭据值）" if fields
+                else "公开可达的管理/配置路由" if accessible and sensitive_route
+                else "发现前端路由"
+            )
             findings.append(ExposureFinding(
                 url=url, source=source, status_code=response["status_code"],
                 content_type=response["content_type"], publicly_accessible=accessible,
                 sensitive_field_types=fields, risk_level=risk, evidence=evidence,
+                confirmed_secret=False,
             ))
         return findings
 
