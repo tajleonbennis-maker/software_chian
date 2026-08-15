@@ -22,6 +22,7 @@ DeepSeek API 兼容 OpenAI 接口格式：
 """
 import json
 import logging
+import os
 import time
 import re
 import requests
@@ -79,7 +80,9 @@ class AIAnalyzer:
     BASE_RETRY_DELAY = 1.5
 
     def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com",
-                 model: str = "deepseek-chat", timeout: int = 60):
+                 model: str = "deepseek-chat", timeout: int = 60,
+                 fallback_api_key: str = "", fallback_base_url: str = "",
+                 fallback_model: str = ""):
         """初始化 AI 分析器
 
         Args:
@@ -93,6 +96,11 @@ class AIAnalyzer:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.fallback_api_key = fallback_api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.fallback_base_url = (
+            fallback_base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+        ).rstrip("/")
+        self.fallback_model = fallback_model or os.environ.get("OPENAI_MODEL", "gpt-5.6-sol")
         # 仅当提供了 API Key 时才认为分析器可用
         self.enabled = bool(api_key)
 
@@ -102,6 +110,33 @@ class AIAnalyzer:
 
     def _call_api(self, system_prompt: str, user_content: str,
                   max_tokens: int = 2000) -> str:
+        """Call the primary model and fail over once to the configured backup."""
+        try:
+            return self._call_provider_api(
+                self.api_key, self.base_url, self.model, "DeepSeek",
+                system_prompt, user_content, max_tokens,
+            )
+        except RuntimeError as primary_error:
+            if not self.fallback_api_key:
+                raise
+            logger.warning(
+                "主模型 %s 调用失败，切换备用模型 %s: %s",
+                self.model, self.fallback_model, primary_error,
+            )
+            try:
+                return self._call_provider_api(
+                    self.fallback_api_key, self.fallback_base_url,
+                    self.fallback_model, "OpenAI fallback",
+                    system_prompt, user_content, max_tokens,
+                )
+            except RuntimeError as fallback_error:
+                raise RuntimeError(
+                    f"主模型失败: {primary_error}; 备用模型失败: {fallback_error}"
+                ) from fallback_error
+
+    def _call_provider_api(self, api_key: str, base_url: str, model: str,
+                           provider_name: str, system_prompt: str,
+                           user_content: str, max_tokens: int = 2000) -> str:
         """调用 DeepSeek API（兼容 OpenAI 格式）
 
         Args:
@@ -115,30 +150,41 @@ class AIAnalyzer:
         Raises:
             RuntimeError: API 调用失败（含重试耗尽、认证失败、网络错误等）
         """
-        url = self.base_url + self.API_PATH
+        url = base_url.rstrip("/") + self.API_PATH
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            # 较低的温度值保证安全分析输出的稳定性和可重复性
-            "temperature": 0.3,
-            "max_tokens": max_tokens,
-            # 倾向于确定性的输出，降低采样随机性
-            "top_p": 0.9,
         }
+        is_openai_reasoning = model.startswith("gpt-5")
+        output_token_field = "max_completion_tokens" if is_openai_reasoning else "max_tokens"
+        payload[output_token_field] = max_tokens
+        if is_openai_reasoning:
+            # GPT-5 reasoning models reject the legacy max_tokens parameter and
+            # sampling controls. Low effort keeps this high-volume fallback bounded.
+            payload["reasoning_effort"] = "low"
+        else:
+            # Sampling controls remain useful for deterministic non-GPT-5 APIs.
+            payload["temperature"] = 0.3
+            payload["top_p"] = 0.9
+        # DeepSeek V4 enables thinking by default. This service needs bounded,
+        # machine-readable final answers; long hidden reasoning can otherwise
+        # consume the entire output budget and leave ``content`` empty.
+        if model.startswith("deepseek-v4"):
+            payload["thinking"] = {"type": "disabled"}
 
         last_error: Optional[str] = None
         # 总共尝试 MAX_RETRIES + 1 次（首次 + 重试）
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                logger.debug("调用 DeepSeek API (attempt=%d/%d, model=%s)",
-                             attempt + 1, self.MAX_RETRIES + 1, self.model)
+                logger.debug("调用 %s API (attempt=%d/%d, model=%s)",
+                             provider_name, attempt + 1, self.MAX_RETRIES + 1, model)
                 resp = requests.post(
                     url, headers=headers, json=payload,
                     timeout=self.timeout,
@@ -147,7 +193,7 @@ class AIAnalyzer:
                 # 401/403 通常是认证或权限问题，重试无意义
                 if resp.status_code in (401, 403):
                     raise RuntimeError(
-                        f"DeepSeek API 认证失败 (HTTP {resp.status_code})，请检查 API Key 配置"
+                        f"{provider_name} API 认证失败 (HTTP {resp.status_code})，请检查 API Key 配置"
                     )
 
                 # 429 限流：等待后重试
@@ -155,14 +201,14 @@ class AIAnalyzer:
                     last_error = f"API 限流 (HTTP 429)"
                     if attempt < self.MAX_RETRIES:
                         wait = self.BASE_RETRY_DELAY * (attempt + 1)
-                        logger.warning("DeepSeek API 限流，%.1f 秒后重试", wait)
+                        logger.warning("%s API 限流，%.1f 秒后重试", provider_name, wait)
                         time.sleep(wait)
                         continue
                     break
 
                 # 5xx 服务端错误：重试
                 if resp.status_code >= 500:
-                    last_error = f"DeepSeek 服务端错误 (HTTP {resp.status_code})"
+                    last_error = f"{provider_name} 服务端错误 (HTTP {resp.status_code})"
                     if attempt < self.MAX_RETRIES:
                         wait = self.BASE_RETRY_DELAY * (attempt + 1)
                         logger.warning("%s，%.1f 秒后重试", last_error, wait)
@@ -179,7 +225,7 @@ class AIAnalyzer:
                     except Exception:
                         err_msg = resp.text[:200]
                     raise RuntimeError(
-                        f"DeepSeek API 请求失败 (HTTP {resp.status_code}): {err_msg}"
+                        f"{provider_name} API 请求失败 (HTTP {resp.status_code}): {err_msg}"
                     )
 
                 # 解析成功响应
@@ -187,7 +233,7 @@ class AIAnalyzer:
                 # 兼容 OpenAI 响应结构：choices[0].message.content
                 choices = data.get("choices") or []
                 if not choices:
-                    raise RuntimeError("DeepSeek API 返回空 choices")
+                    raise RuntimeError(f"{provider_name} API 返回空 choices")
                 content = choices[0].get("message", {}).get("content", "")
                 finish_reason = choices[0].get("finish_reason", "")
                 # 推理模型：content 为空但 finish_reason=length → reasoning 吃满 token，
@@ -195,21 +241,22 @@ class AIAnalyzer:
                 if not content and finish_reason == "length" and max_tokens < 8000:
                     logger.warning("AI 返回 content 为空（reasoning 占满 max_tokens=%d），放大重试", max_tokens)
                     max_tokens = min(max_tokens * 4, 8000)
+                    payload[output_token_field] = max_tokens
                     if attempt < self.MAX_RETRIES:
                         continue
                 if not content:
-                    raise RuntimeError("DeepSeek API 返回空 content")
+                    raise RuntimeError(f"{provider_name} API 返回空 content")
                 return content.strip()
 
             except requests.Timeout:
-                last_error = f"DeepSeek API 请求超时（{self.timeout}s）"
+                last_error = f"{provider_name} API 请求超时（{self.timeout}s）"
                 logger.warning(last_error)
                 if attempt < self.MAX_RETRIES:
                     time.sleep(self.BASE_RETRY_DELAY * (attempt + 1))
                     continue
                 break
             except requests.ConnectionError as e:
-                last_error = f"DeepSeek API 网络连接错误: {e}"
+                last_error = f"{provider_name} API 网络连接错误: {e}"
                 logger.warning(last_error)
                 if attempt < self.MAX_RETRIES:
                     time.sleep(self.BASE_RETRY_DELAY * (attempt + 1))
@@ -219,7 +266,7 @@ class AIAnalyzer:
                 # 认证类错误直接抛出，不重试
                 raise
             except Exception as e:
-                last_error = f"DeepSeek API 调用异常: {e}"
+                last_error = f"{provider_name} API 调用异常: {e}"
                 logger.warning(last_error, exc_info=True)
                 if attempt < self.MAX_RETRIES:
                     time.sleep(self.BASE_RETRY_DELAY * (attempt + 1))
@@ -227,7 +274,7 @@ class AIAnalyzer:
                 break
 
         # 所有重试均失败
-        raise RuntimeError(last_error or "DeepSeek API 调用失败")
+        raise RuntimeError(last_error or f"{provider_name} API 调用失败")
 
     # ============================================================
     # JSON 解析（容错）
